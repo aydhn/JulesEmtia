@@ -1,18 +1,21 @@
 version: '3.8'
 
 services:
-  ed_quant:
+  quant_engine:
     build: .
-    container_name: ed_quant
+    container_name: ed_capital_quant
     restart: always
-    env_file: .env
+    environment:
+      - TZ=Europe/Istanbul
+    env_file:
+      - .env
     volumes:
+      - ./db:/app/db
       - ./logs:/app/logs
       - ./models:/app/models
-      # Important to prevent overwriting paper DB on restart
-      - paper_db_volume:/app/paper_db.sqlite3
-    environment:
-      - TZ=${TZ:-Europe/Istanbul}
-
-volumes:
-  paper_db_volume:
+      - ./reports:/app/reports
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sqlite3; sqlite3.connect('db/paper_db.sqlite3').close()"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
