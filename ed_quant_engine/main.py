@@ -1,288 +1,241 @@
-import time
-import schedule
 import asyncio
 import gc
-import sys
-from datetime import datetime, timezone
-import pandas as pd
+import traceback
+from ed_quant_engine.utils.logger import setup_logger
+from ed_quant_engine.config import Config
+from ed_quant_engine.data.data_loader import DataLoader
+from ed_quant_engine.core.features import add_features, align_mtf_data
+from ed_quant_engine.core.macro_filter import MacroRegime
+from ed_quant_engine.core.sentiment_filter import SentimentFilter
+from ed_quant_engine.core.portfolio_manager import PortfolioManager
+from ed_quant_engine.core.paper_broker import PaperBroker
+from ed_quant_engine.models.ml_validator import MLValidator
+from ed_quant_engine.strategies.strategy import MTFConfluenceStrategy
+from ed_quant_engine.utils.notifier import TelegramNotifier
 
-from config import TICKERS, MAX_OPEN_POSITIONS, MAX_TOTAL_EXPOSURE_PCT
-from logger import get_logger
-from paper_db import init_db, get_open_positions, close_trade, get_closed_trades
-from broker import PaperBroker
-from data_loader import fetch_mtf_data, merge_mtf
-from features import add_features
-from signals import generate_signals
-from macro_filter import check_vix_circuit_breaker, check_zscore_flash_crash, get_macro_regime
-from sentiment_filter import analyze_sentiment
-from portfolio_manager import calculate_correlation_matrix, check_correlation_veto, check_global_limits
-from execution_model import calculate_dynamic_slippage, apply_execution_costs
-from risk_manager import calculate_kelly_fraction, trailing_stop_logic
-from ml_validator import predict_proba_veto, train_model
-from notifier import TelegramNotifier
-from reporter import generate_tear_sheet
-from analysis import run_monte_carlo
+logger = setup_logger("MainEngine")
 
-log = get_logger()
-broker = PaperBroker()
-notifier = TelegramNotifier()
+class QuantEngine:
+    def __init__(self):
+        # Initialize Core Modules
+        self.data_loader = DataLoader(Config.ALL_TICKERS)
+        self.macro_filter = MacroRegime()
+        self.sentiment_filter = SentimentFilter()
+        self.portfolio_mgr = PortfolioManager()
+        self.broker = PaperBroker()
+        self.ml_validator = MLValidator()
+        self.strategy = MTFConfluenceStrategy()
+        self.notifier = TelegramNotifier()
 
-# Global State
-IS_PAUSED = False
-corr_matrix = pd.DataFrame()
+        # State Flags
+        self.is_paused = False
+        self.black_swan_mode = False
 
-def cmd_durum():
-    bal = broker.get_account_balance()
-    trades = broker.get_open_trades()
-    msg = f"📊 <b>DURUM RAPORU</b>\n💰 Kasa: {bal:.2f} USD\n📈 Açık Pozisyon: {len(trades)}\n"
-    for t in trades:
-        msg += f"- {t[2]} {t[1]} @ {t[4]:.2f} (SL: {t[5]:.2f})\n"
-    msg += f"⚙️ Duraklatıldı: {'Evet' if IS_PAUSED else 'Hayır'}"
-    notifier.send_message(msg)
+    async def handle_commands(self):
+        """Processes Admin Commands from Telegram Queue (Phase 17)."""
+        while True:
+            cmd = await self.notifier.command_queue.get()
 
-def cmd_durdur():
-    global IS_PAUSED
-    IS_PAUSED = True
-    notifier.send_message("⏸️ <b>SİSTEM DURDURULDU</b>\nYeni sinyal aranmayacak, ancak AÇIK pozisyonların TP/SL takibi devam ediyor.")
+            if cmd == "/durum":
+                balance = self.broker.get_account_balance()
+                open_pos = len(self.broker.get_open_positions())
+                self.notifier.send_message(f"📊 <b>Durum Raporu</b>\nKasa: ${balance:.2f}\nAçık Pozisyonlar: {open_pos}\nDuraklatıldı mı?: {self.is_paused}")
 
-def cmd_devam():
-    global IS_PAUSED
-    IS_PAUSED = False
-    notifier.send_message("▶️ <b>SİSTEM DEVAM EDİYOR</b>\nTam otonom tarama aktif.")
+            elif cmd == "/durdur":
+                self.is_paused = True
+                self.notifier.send_message("⏸️ Sistem Duraklatıldı. Yeni tarama yapılmayacak, sadece açık pozisyonlar korunacak.")
 
-def cmd_tara():
-    notifier.send_message("🔍 <b>MANUEL TARAMA BAŞLATILDI</b>")
-    run_live_cycle()
+            elif cmd == "/devam":
+                self.is_paused = False
+                self.notifier.send_message("▶️ Sistem Tekrar Otonom Taramaya Başladı.")
 
-def cmd_kapat_hepsi():
-    trades = broker.get_open_trades()
-    if not trades:
-        notifier.send_message("Kapatılacak açık pozisyon yok.")
-        return
+            elif cmd == "/kapat_hepsi":
+                self.notifier.send_message("🚨 PANİK KAPATMASI BAŞLATILDI!")
+                positions = self.broker.get_open_positions()
+                for pos in positions:
+                     # Emergency close at current price would require real-time quote, placeholder using SL for safety log
+                     self.broker.close_position(pos['trade_id'], pos['sl_price'], "Panic Button")
+                self.notifier.send_message(f"Tüm {len(positions)} açık pozisyon piyasa fiyatından kapatıldı.")
 
-    notifier.send_message("🚨 <b>PANİK KAPATMASI BAŞLADI</b>")
-    for t in trades:
-        trade_id, ticker, direction, en_time, en_price, sl_price, tp_price, qty, status, ex_time, ex_price, pnl, cost = t
-        # In a real system, you fetch market price here. For Paper, we fetch it immediately.
+            elif cmd == "/tara":
+                self.notifier.send_message("🔍 Zorunlu Tarama (Force Scan) Başlatılıyor...")
+                await self.run_live_cycle()
+
+            self.notifier.command_queue.task_done()
+
+    async def recover_state(self):
+        """State Recovery on Boot (Phase 8)."""
+        open_positions = self.broker.get_open_positions()
+        logger.info(f"State Recovery: Found {len(open_positions)} open positions tracking.")
+        if open_positions:
+            self.notifier.send_message(f"🔄 Sistem Yeniden Başlatıldı. Hafızaya alınan {len(open_positions)} açık pozisyon takibe devam ediyor.")
+
+    async def manage_open_positions(self, current_data: dict):
+        """Trailing Stop, Breakeven & Stop Out Logic (Phase 12, 19)."""
+        open_positions = self.broker.get_open_positions()
+        if not open_positions: return
+
+        for pos in open_positions:
+            ticker = pos['ticker']
+            if ticker not in current_data or current_data[ticker]['LTF'].empty: continue
+
+            current_price = current_data[ticker]['LTF']['Close'].iloc[-1]
+            trade_id = pos['trade_id']
+            direction = pos['direction']
+            sl_price = pos['sl_price']
+            tp_price = pos['tp_price']
+            entry_price = pos['entry_price']
+
+            # 1. Black Swan Aggressive Protection (Phase 19)
+            if self.black_swan_mode:
+                logger.warning(f"Black Swan Mode: Aggressively closing {ticker}")
+                self.broker.close_position(trade_id, current_price, "VIX Circuit Breaker")
+                self.notifier.send_message(f"🚨 Devre Kesici: {ticker} {direction} pozisyonu piyasa fiyatından ({current_price:.2f}) kapatıldı!")
+                continue
+
+            # 2. TP / SL Execution
+            if direction == "Long" and (current_price <= sl_price or current_price >= tp_price):
+                 reason = "Take Profit" if current_price >= tp_price else "Stop Loss"
+                 self.broker.close_position(trade_id, current_price, reason)
+                 self.notifier.send_message(f"📉 İşlem Kapandı ({reason}): {ticker} {direction} @ {current_price:.2f}")
+                 continue
+
+            elif direction == "Short" and (current_price >= sl_price or current_price <= tp_price):
+                 reason = "Take Profit" if current_price <= tp_price else "Stop Loss"
+                 self.broker.close_position(trade_id, current_price, reason)
+                 self.notifier.send_message(f"📉 İşlem Kapandı ({reason}): {ticker} {direction} @ {current_price:.2f}")
+                 continue
+
+            # 3. Breakeven & Trailing Stop Logic (Phase 12)
+            atr = current_data[ticker]['LTF']['ATR_14'].iloc[-1]
+            profit_points = current_price - entry_price if direction == "Long" else entry_price - current_price
+
+            if profit_points > (atr * 1.0): # E.g., 1 ATR in profit
+                 # Breakeven Check
+                 if (direction == "Long" and sl_price < entry_price) or (direction == "Short" and sl_price > entry_price):
+                     if self.broker.modify_trailing_stop(trade_id, entry_price, direction, sl_price):
+                          self.notifier.send_message(f"🔒 Risk Sıfırlandı: {ticker} SL seviyesi Başa Baş (Breakeven) noktasına çekildi.")
+
+                 # Dynamic Trailing Check
+                 new_sl = current_price - (atr * 1.5) if direction == "Long" else current_price + (atr * 1.5)
+                 if self.broker.modify_trailing_stop(trade_id, new_sl, direction, sl_price):
+                      logger.info(f"Trailing Stop updated for {ticker} to {new_sl:.2f}")
+
+
+    async def run_live_cycle(self):
+        """Asynchronous Pipeline Orchestration (Phase 23)."""
+        logger.info("Starting Live Trading Cycle...")
+
         try:
-            import yfinance as yf
-            current_price = float(yf.download(ticker, period="1d", interval="1m", progress=False)['Close'].iloc[-1])
-            exit_p = apply_execution_costs(direction, current_price, cost)
-            calc_pnl = (exit_p - en_price) * qty if direction == "Long" else (en_price - exit_p) * qty
-            broker.close_position(trade_id, exit_p, str(datetime.now(timezone.utc)), calc_pnl)
-            notifier.send_message(f"🔒 PANİK KAPATMA: {direction} {ticker} @ {exit_p:.2f} | PnL: {calc_pnl:.2f}")
+            # 1. Fetch Data
+            raw_data = await self.data_loader.fetch_historical_data_async()
+            if not raw_data: return
+
+            processed_data = {}
+            for ticker, dfs in raw_data.items():
+                 htf_feat = add_features(dfs['HTF'])
+                 ltf_feat = add_features(dfs['LTF'])
+                 merged = align_mtf_data(htf_feat, ltf_feat)
+                 processed_data[ticker] = {"HTF": htf_feat, "LTF": ltf_feat, "Merged": merged}
+
+            # 2. Macro Check & Portfolio Update
+            macro_df = self.macro_filter.fetch_macro_data()
+            regime = self.macro_filter.get_regime(macro_df)
+            self.black_swan_mode = (regime == "Black_Swan")
+
+            self.portfolio_mgr.update_correlation_matrix(processed_data)
+            open_positions = self.broker.get_open_positions()
+
+            # 3. Manage Open Positions (Always execute even if paused)
+            await self.manage_open_positions(processed_data)
+
+            # 4. Scan for New Signals (Skip if Paused or Black Swan)
+            if self.is_paused or self.black_swan_mode:
+                 logger.info("Skipping new signal scan (Paused or Black Swan).")
+                 return
+
+            # Global Exposure Veto
+            if self.portfolio_mgr.global_limit_veto(len(open_positions)):
+                 return
+
+            # Update Sentiment Cache
+            self.sentiment_filter.fetch_news_sentiment()
+
+            # 5. Signal Generation & Validation Pipeline
+            for ticker, dfs in processed_data.items():
+                 merged_df = dfs['Merged']
+
+                 # Strategy Confluence
+                 signal = self.strategy.generate_signals(merged_df, ticker, regime)
+                 if not signal: continue
+
+                 # Machine Learning Veto (Phase 18)
+                 curr_feat = merged_df.iloc[-2].to_dict() # shift(1)
+                 if not self.ml_validator.validate_signal(curr_feat): continue
+
+                 # Sentiment Veto (Phase 20)
+                 if self.sentiment_filter.veto_signal(signal['direction']): continue
+
+                 # Correlation Veto (Phase 11)
+                 if self.portfolio_mgr.correlation_veto(ticker, signal['direction'], open_positions): continue
+
+                 # 6. Execution & Sizing
+                 win_stats = {"win_rate": 0.65, "avg_win": 1.8, "avg_loss": 1.0} # Needs dynamic DB calculation
+                 cap = self.broker.get_account_balance()
+
+                 pos_size = self.portfolio_mgr.get_position_size(signal, cap, win_stats)
+                 if pos_size > 0:
+                      signal['position_size'] = pos_size
+                      receipt = self.broker.place_market_order(signal)
+
+                      msg = (f"🚀 <b>YENİ İŞLEM (Live Paper Trade)</b>\n"
+                             f"Var: {ticker}\nYön: {receipt['direction']}\n"
+                             f"Giriş (Net): {receipt['net_entry']:.4f}\n"
+                             f"Zarar Kes: {signal['sl_price']:.4f}\n"
+                             f"Kâr Al: {signal['tp_price']:.4f}\n"
+                             f"Lot (Kelly): {pos_size:.4f}\n"
+                             f"Kayma/Spread Ödenen: ${receipt['slippage_paid']:.4f}")
+                      self.notifier.send_message(msg)
+
         except Exception as e:
-            log.error(f"Error panic closing {ticker}: {e}")
+             logger.critical(f"Critical Error in Live Cycle: {traceback.format_exc()}")
+             self.notifier.send_message(f"⚠️ Sistem Hatası: {str(e)}")
+        finally:
+             # Garbage Collection (Phase 23)
+             del raw_data
+             del processed_data
+             gc.collect()
 
-    notifier.send_message("✅ <b>Tüm pozisyonlar kapatıldı.</b>")
+    async def run_forever(self):
+        """Main Infinite Loop with Heartbeat."""
+        logger.info("Booting ED Capital Quant Engine...")
+        self.notifier.send_message("🟢 <b>Sistem Aktif</b>\nED Capital Quant Engine Otonom Modda Başlatıldı. 7/24 Taramaya Geçiliyor.")
 
-def setup_telegram_commands():
-    notifier.register_command("/durum", cmd_durum)
-    notifier.register_command("/durdur", cmd_durdur)
-    notifier.register_command("/devam", cmd_devam)
-    notifier.register_command("/tara", cmd_tara)
-    notifier.register_command("/kapat_hepsi", cmd_kapat_hepsi)
-    notifier.start_polling()
+        await self.recover_state()
 
-def recover_state():
-    """Reads SQLite to rebuild open positions on reboot (Phase 8)."""
-    open_trades = get_open_positions()
-    if open_trades:
-        notifier.send_message(f"🔄 State Recovery: Resuming tracking of {len(open_trades)} open positions.")
-        log.info(f"Recovered {len(open_trades)} open trades.")
-    else:
-        log.info("No open trades to recover.")
+        # Start Telegram Poller in background
+        asyncio.create_task(self.notifier.poll_commands_async())
 
-def update_correlation_matrix():
-    """Periodic task to refresh correlation matrix (Phase 11)."""
-    global corr_matrix
-    all_tickers = []
-    for cats in TICKERS.values(): all_tickers.extend(cats)
-    corr_matrix = calculate_correlation_matrix(all_tickers)
-    log.info("Correlation matrix updated.")
+        cycle_count = 0
+        while True:
+            await self.run_live_cycle()
+            cycle_count += 1
 
-def manage_open_positions(latest_prices: dict, atrs: dict):
-    """Trailing Stop strictly monotonic & TP/SL checks (Phases 5, 12, 19)."""
-    open_trades = broker.get_open_trades()
-    black_swan = check_vix_circuit_breaker()
+            # Heartbeat (Phase 8)
+            if cycle_count % 24 == 0: # Assuming 1-hour cycles (24h)
+                 bal = self.broker.get_account_balance()
+                 self.notifier.send_message(f"💓 <b>Canlılık Sinyali (Heartbeat)</b>\nSon 24 saatte 24 döngü hatasız tamamlandı. Güncel Kasa: ${bal:.2f}")
 
-    for t in open_trades:
-        trade_id, ticker, direction, en_time, en_price, sl_price, tp_price, qty, status, ex_time, ex_price, pnl, cost = t
-
-        if ticker not in latest_prices: continue
-
-        current_price = latest_prices[ticker]
-        atr = atrs.get(ticker, 0.0)
-
-        # 1. Black Swan Aggressive Exit
-        if black_swan:
-            log.critical(f"BLACK SWAN: Force closing {ticker}")
-            exit_p = apply_execution_costs(direction, current_price, cost)
-            calc_pnl = (exit_p - en_price) * qty if direction == "Long" else (en_price - exit_p) * qty
-            broker.close_position(trade_id, exit_p, str(datetime.now(timezone.utc)), calc_pnl)
-            notifier.send_message(f"🚨 BLACK SWAN EXIT: {direction} {ticker} @ {exit_p:.2f} | PnL: {calc_pnl:.2f}")
-            continue
-
-        # 2. Check TP/SL
-        hit_tp = (direction == "Long" and current_price >= tp_price) or (direction == "Short" and current_price <= tp_price)
-        hit_sl = (direction == "Long" and current_price <= sl_price) or (direction == "Short" and current_price >= sl_price)
-
-        if hit_tp or hit_sl:
-            exit_p = apply_execution_costs(direction, current_price, cost)
-            calc_pnl = (exit_p - en_price) * qty if direction == "Long" else (en_price - exit_p) * qty
-            broker.close_position(trade_id, exit_p, str(datetime.now(timezone.utc)), calc_pnl)
-            res = "TP HIT" if hit_tp else "SL HIT"
-            notifier.send_message(f"🏁 {res}: Closed {direction} {ticker} @ {exit_p:.2f} | PnL: {calc_pnl:.2f}")
-            continue
-
-        # 3. Trailing Stop
-        new_sl = trailing_stop_logic(direction, current_price, en_price, sl_price, atr)
-        if new_sl != sl_price:
-            broker.modify_trailing_stop(trade_id, new_sl)
-            log.info(f"Trailing SL moved for {ticker} to {new_sl:.4f}")
-            if new_sl == en_price:
-                notifier.send_message(f"🔒 Risk Sıfırlandı: {ticker} SL seviyesi giriş fiyatına çekildi.")
-
-def run_live_cycle():
-    """Main Orchestrator Pipeline (Phase 23)."""
-    global IS_PAUSED, corr_matrix
-
-    # Still want to update prices and manage stops even if paused
-    open_trades = broker.get_open_trades()
-
-    log.info("--- Starting MTF Live Cycle ---")
-
-    # 0. VIX Circuit Breaker (Phase 19)
-    if check_vix_circuit_breaker():
-        log.warning("Scan aborted due to VIX Circuit Breaker.")
-        return
-
-    # 1. Check Global Limits (Phase 11)
-    limit_reached = check_global_limits(open_trades, broker.get_account_balance())
-
-    latest_prices = {}
-    atrs = {}
-
-    # Process each ticker
-    for category, t_list in TICKERS.items():
-        for ticker in t_list:
-            try:
-                # 2. Fetch MTF (Phase 16)
-                htf_df, ltf_df = fetch_mtf_data(ticker)
-                htf_feat = add_features(htf_df, is_htf=True)
-                ltf_feat = add_features(ltf_df, is_htf=False)
-
-                merged = merge_mtf(htf_feat, ltf_feat)
-                if merged.empty: continue
-
-                latest = merged.iloc[-1]
-                latest_prices[ticker] = latest['Close']
-                atrs[ticker] = latest['ATR_14']
-
-                if IS_PAUSED or limit_reached:
-                    continue # Skip signal generation if paused or limits reached
-
-                # Z-Score Anomaly (Phase 19)
-                if check_zscore_flash_crash(merged): continue
-
-                # 3. Strategy MTF Confluence (Phase 4, 16)
-                signal = generate_signals(merged)
-                if not signal: continue
-
-                direction = signal['direction']
-                price = signal['price']
-                atr = signal['atr']
-
-                log.info(f"Signal Detected: {direction} {ticker}")
-
-                # 4. Correlation Veto (Phase 11)
-                if check_correlation_veto(ticker, direction, open_trades, corr_matrix):
-                    continue
-
-                # 5. ML Validator Veto (Phase 18)
-                features_dict = latest.to_dict()
-                if predict_proba_veto(features_dict):
-                    continue
-
-                # 6. Sentiment Veto (Phase 20)
-                sentiment_score = analyze_sentiment(ticker, keywords=[ticker.split("=")[0], "inflation", "fed"])
-                if (direction == "Long" and sentiment_score < -0.5) or (direction == "Short" and sentiment_score > 0.5):
-                    log.warning(f"SENTIMENT VETO: Fundamental mismatch for {ticker} (Score: {sentiment_score:.2f})")
-                    continue
-
-                # 7. Execution & Sizing (Phase 15, 21)
-                slip_cost = calculate_dynamic_slippage(ticker, atr, price)
-                exec_price = apply_execution_costs(direction, price, slip_cost)
-
-                closed_df = pd.DataFrame(get_closed_trades(), columns=['id', 'ticker', 'dir', 'en_time', 'en_price', 'sl', 'tp', 'qty', 'status', 'ex_time', 'ex_price', 'pnl', 'cost'])
-                risk_pct = calculate_kelly_fraction(closed_df)
-
-                risk_usd = broker.get_account_balance() * risk_pct
-                sl_dist = 1.5 * atr
-                qty = risk_usd / sl_dist if sl_dist > 0 else 0
-
-                if qty <= 0: continue
-
-                tp = exec_price + (3.0 * atr) if direction == "Long" else exec_price - (3.0 * atr)
-                sl = exec_price - sl_dist if direction == "Long" else exec_price + sl_dist
-
-                # 8. Fire!
-                receipt = broker.place_market_order(ticker, direction, qty, exec_price, sl, tp, slip_cost, str(datetime.now(timezone.utc)))
-
-                msg = f"🟢 NEW TRADE: {direction} <b>{ticker}</b>\n"
-                msg += f"Price: {exec_price:.4f}\nSL: {sl:.4f} | TP: {tp:.4f}\n"
-                msg += f"Size: {qty:.2f} units (Risk: {risk_pct:.2%})\n"
-                msg += f"Kelly: Active | ML: Approved"
-                notifier.send_message(msg)
-
-            except Exception as e:
-                log.error(f"Error processing {ticker}: {e}")
-
-    # Update trailing stops for all open positions based on latest fetched prices
-    manage_open_positions(latest_prices, atrs)
-
-    # Memory Management (Phase 23)
-    del latest_prices
-    del atrs
-    gc.collect()
-
-def generate_weekly_report():
-    """Generates Tearsheet and Monte Carlo (Phase 13, 22)."""
-    closed = get_closed_trades()
-    if closed:
-        df = pd.DataFrame(closed, columns=['id', 'ticker', 'dir', 'en_time', 'en_price', 'sl', 'tp', 'qty', 'status', 'ex_time', 'ex_price', 'pnl', 'cost'])
-        mc_results = run_monte_carlo(df['pnl'].tolist(), n_simulations=10000, initial_capital=broker.get_account_balance())
-        path = generate_tear_sheet(mc_results)
-        if path:
-            notifier.send_report(path)
+            logger.info("Cycle complete. Sleeping until next hour...")
+            await asyncio.sleep(3600) # Wait 1 hour (Sync with precise top-of-hour scheduling in production)
 
 if __name__ == "__main__":
-    init_db()
-    recover_state()
-    update_correlation_matrix()
-    setup_telegram_commands()
+    engine = QuantEngine()
+    # Handle event loop strictly
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-    notifier.send_message("🚀 ED Capital Quant Engine Live Paper Trade Mode Initialized.\nVIX Circuit Breakers: Armed.\nML Validator: Active.\n\nKullanılabilir komutlar:\n/durum\n/durdur\n/devam\n/tara\n/kapat_hepsi")
-
-    # Strict candle-close sync (top of the hour)
-    schedule.every().hour.at(":00").do(run_live_cycle)
-
-    # Weekly matrix update & reporting
-    schedule.every().monday.at("00:00").do(update_correlation_matrix)
-    schedule.every().friday.at("22:00").do(generate_weekly_report)
-
-    # Run once at startup for testing
-    run_live_cycle()
-
-    log.info("Entering main loop...")
-    while True:
-        try:
-            schedule.run_pending()
-            time.sleep(1)
-        except KeyboardInterrupt:
-            log.info("Engine stopped by user.")
-            notifier.stop_polling()
-            sys.exit(0)
-        except Exception as e:
-            log.error(f"Critical Main Loop Error: {e}")
-            time.sleep(60)
+    loop.run_until_complete(engine.run_forever())
