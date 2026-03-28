@@ -1,15 +1,31 @@
 # ED Capital Quant Engine 🚀
 
-Bu proje, düşük frekanslı (Low Frequency), yüksek isabet oranlı (High Win-Rate), sıfır bütçeli ve tamamen modüler bir Algoritmik İşlem / Paper Trading Motorudur.
+A low-frequency, highly robust, multi-timeframe algorithmic trading bot designed with a "zero-budget" constraint using free APIs (yfinance) and open-source libraries.
 
-## Mimari Özellikler
-- **Anti-Lookahead Bias:** Zaman dilimi (MTF) birleştirmelerinde sızıntı sıfıra indirilmiştir.
-- **Risk Yönetimi:** Fractional Kelly Kriteri, Dinamik ATR İzleyen Stop ve VIX Siyah Kuğu Devre Kesici.
-- **Yapay Zeka:** Random Forest Sinyal Doğrulama ve NLTK VADER Duyarlılık (Sentiment) Analizi.
-- **Maliyet Simülasyonu:** Slippage ve Spread hesaplamaları net getiri üzerinden yapılır.
-- **Raporlama:** Monte Carlo Stres Testi ve Kurumsal HTML Tear Sheet.
+## 🏗️ Architecture & Purpose
 
-## Kurulum
-1. `.env.example` dosyasını `.env` olarak kopyalayın ve Telegram Token bilgilerinizi girin.
-2. `docker-compose up -d --build` komutuyla sistemi ayağa kaldırın.
-3. Telegram üzerinden `/durum`, `/tara` komutlarıyla sistemi test edin.
+Designed with the risk tolerance of JP Morgan and the algorithmic intuition of Bill Benter.
+- **Low Frequency:** Targets hourly entries (1H) validated by daily trends (1D) to minimize noise and maximize the win rate.
+- **Zero Lookahead Bias:** Timeframe alignment is strictly backward-shifted.
+- **Circuit Breakers:** VIX and Z-Score anomaly detection aggressively halt trading during "Black Swan" events.
+- **Dynamic Risk:** Fractional Kelly criterion dictates position sizing alongside ATR-based strictly monotonic trailing stops.
+- **ML Validation:** Scikit-Learn Random Forest acts as a probability veto threshold.
+- **NLP Sentiment:** NLTK VADER parses RSS feeds for fundamental confluence.
+
+## ⚙️ Installation & Execution
+
+The engine is built to run 24/7 on a Linux environment (WSL/Ubuntu) using Docker.
+
+1. **Clone & Configure:**
+   ```bash
+   cp .env.example .env
+   # Edit .env and add your TELEGRAM_BOT_TOKEN and ADMIN_CHAT_ID
+   ```
+2. **Start the Engine:**
+   ```bash
+   ./manage_bot.sh start
+   ```
+3. **Monitor Logs:**
+   ```bash
+   ./manage_bot.sh logs
+   ```

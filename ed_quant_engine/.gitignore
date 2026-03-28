@@ -1,8 +1,25 @@
+# Security First
 .env
-__pycache__/
-*.pyc
+# Database
+*.db
+*.sqlite3
+data/paper_db.sqlite3
+# Logs
 logs/
-data/*.sqlite3
-data/*.pkl
+*.log
+# Models
+models/
+*.pkl
+*.joblib
+# Python Caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+# IDE
 .vscode/
-data/reports/
+.idea/
+# Output Reports
+reports/
+*.pdf
+*.html
