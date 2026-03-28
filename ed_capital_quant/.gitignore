@@ -1,9 +1,8 @@
 .env
 __pycache__/
 *.pyc
-logs/
-*.db
 *.sqlite3
+*.db
+logs/
+models/*.pkl
 .vscode/
-venv/
-*.pkl

@@ -1,77 +1,33 @@
-"""
-ED Capital Quant Engine - Signal Generation Module
-High win-rate algorithmic logic combining confluence and JP Morgan risk metrics.
-"""
 import pandas as pd
-from ..core.logger import logger
-from ..core.config import RISK_PER_TRADE_PCT
-from ..risk.position_sizing import calculate_position_size
+from data.macro_filter import check_vix_circuit_breaker, get_macro_regime
+from data.sentiment import get_news_sentiment
 
-def generate_signals(df: pd.DataFrame, ticker: str) -> dict:
-    """Analyze the dataframe for trade signals using shifted (closed) candles to prevent lookahead bias."""
-    if df.empty or len(df) < 2:
-        return {}
+def generate_signals(df: pd.DataFrame, ticker: str) -> int:
+    if check_vix_circuit_breaker():
+        return 0
 
-    # Get the LAST CLOSED candle (since we already shifted the columns by 1 in add_features)
-    # Actually, if we shifted them to '_prev', we can use the current row's '_prev' values.
-    # The 'Close' of the current row is the current open/tick, but we only make decisions on the prev candle.
-    current_row = df.iloc[-1]
+    sentiment_score = get_news_sentiment(ticker.split('=')[0])
+    if get_macro_regime() == "RISK_OFF" and sentiment_score < -0.5:
+        return 0
 
-    # Check if necessary columns exist
-    if 'EMA_50_prev' not in current_row:
-        logger.warning(f"Missing '_prev' columns in features for {ticker}. Check indicators module.")
-        return {}
+    close = df['Close'].iloc[-2]
+    ema_50 = df['EMA_50'].iloc[-2]
+    rsi = df['RSI_14'].iloc[-2]
+    macd = df['MACDh_12_26_9'].iloc[-2]
+    bb_lower = df['BBL_20_2.0'].iloc[-2]
+    bb_upper = df['BBU_20_2.0'].iloc[-2]
 
-    # Variables for logic
-    prev_close = df['Close'].iloc[-2] # The close of the candle before the current tick
-    ema50 = current_row['EMA_50_prev']
-    rsi = current_row['RSI_14_prev']
-    macd_hist = current_row['MACDh_12_26_9_prev']
-    bb_lower = current_row['BBL_20_2.0_prev']
-    bb_upper = current_row['BBU_20_2.0_prev']
-    atr = current_row['ATR_14_prev']
+    if close > ema_50 and (rsi < 30 or close <= bb_lower) and macd > 0:
+        return 1
+    elif close < ema_50 and (rsi > 70 or close >= bb_upper) and macd < 0:
+        return -1
+    return 0
 
-    signal = 0 # 0: None, 1: Long, -1: Short
-
-    # 1. Long Confluence
-    # Price > EMA50 AND (RSI < 30 OR Price touched Lower BB) AND MACD Histogram > 0
-    if (prev_close > ema50) and ((rsi < 30) or (prev_close <= bb_lower)) and (macd_hist > 0):
-        signal = 1
-
-    # 2. Short Confluence
-    # Price < EMA50 AND (RSI > 70 OR Price touched Upper BB) AND MACD Histogram < 0
-    elif (prev_close < ema50) and ((rsi > 70) or (prev_close >= bb_upper)) and (macd_hist < 0):
-        signal = -1
-
-    if signal != 0:
-        direction = "Long" if signal == 1 else "Short"
-        entry_price = df['Close'].iloc[-1] # Enter at the current open/tick
-
-        # JP Morgan Dynamic Risk (ATR-based SL/TP)
-        if direction == "Long":
-            sl_price = entry_price - (1.5 * atr)
-            tp_price = entry_price + (3.0 * atr)
-        else:
-            sl_price = entry_price + (1.5 * atr)
-            tp_price = entry_price - (3.0 * atr)
-
-        # Calculate position size
-        # Assume a standard 10k paper portfolio
-        portfolio_balance = 10000.0
-        risk_amount = portfolio_balance * RISK_PER_TRADE_PCT
-        position_size = calculate_position_size(risk_amount, entry_price, sl_price)
-
-        signal_data = {
-            "ticker": ticker,
-            "direction": direction,
-            "entry_price": entry_price,
-            "sl_price": sl_price,
-            "tp_price": tp_price,
-            "position_size": position_size,
-            "atr": atr
-        }
-
-        logger.info(f"Signal Generated: {signal_data}")
-        return signal_data
-
-    return {}
+def calc_dynamic_sl_tp(entry_price: float, atr: float, direction: int):
+    if direction == 1:
+        sl = entry_price - (1.5 * atr)
+        tp = entry_price + (3.0 * atr)
+    else:
+        sl = entry_price + (1.5 * atr)
+        tp = entry_price - (3.0 * atr)
+    return sl, tp
