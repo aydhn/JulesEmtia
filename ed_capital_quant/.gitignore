@@ -1,39 +1,8 @@
-# Environments
 .env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-
-# Database
-data_storage/*.sqlite3
-data_storage/*.db
-paper_db.sqlite3
-
-# Logs
+data/*.db
+data/*.sqlite3
 logs/*.log
-
-# IDE
+__pycache__/
+*.pyc
 .vscode/
-.idea/
-
-# ML Models
-data_storage/*.pkl
-data_storage/*.joblib
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Reports
-reports/*.pdf
-reports/*.html
-.venv/
+data/*.pkl
