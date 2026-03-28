@@ -1,21 +1,30 @@
-version: "3.8"
+version: '3.8'
 
 services:
   quant_engine:
     build: .
-    container_name: ed_capital_bot
+    container_name: ed_capital_quant_engine
     restart: always
-    environment:
-      - TZ=Europe/Istanbul
     env_file:
       - .env
+    environment:
+      - TZ=Europe/Istanbul
     volumes:
-      - ./paper_db.sqlite3:/app/paper_db.sqlite3
+      - ./data_storage:/app/data_storage
       - ./logs:/app/logs
-      - ./models:/app/models
       - ./reports:/app/reports
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+
+  redis:
+    image: redis:alpine
+    container_name: quant_redis_cache
+    restart: always
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:

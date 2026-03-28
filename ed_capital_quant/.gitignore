@@ -7,49 +7,33 @@ ENV/
 env.bak/
 venv.bak/
 
-# SQLite Databases
-*.sqlite3
-*.db
-paper_db.sqlite3
-paper_db.db
-
-# Logs & Artifacts
-logs/
-*.log
-data/
-models/
-*.pkl
-*.joblib
-reports/
-*.pdf
-*.html
-
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
 
-# IDEs
+# Database
+data_storage/*.sqlite3
+data_storage/*.db
+paper_db.sqlite3
+
+# Logs
+logs/*.log
+
+# IDE
 .vscode/
 .idea/
-*.swp
-*.swo
+
+# ML Models
+data_storage/*.pkl
+data_storage/*.joblib
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Reports
+reports/*.pdf
+reports/*.html
+.venv/
