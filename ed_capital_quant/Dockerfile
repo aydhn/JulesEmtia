@@ -1,27 +1,34 @@
 FROM python:3.10-slim
 
-# Çalışma dizinini ayarla
-WORKDIR /app
-
-# Gerekli OS kütüphanelerini yükle (pdfkit için wkhtmltopdf dahil)
+# Install OS dependencies for building ML and basic network tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    wkhtmltopdf \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Bağımlılıkları kopyala ve yükle
+# Set working directory
+WORKDIR /app
+
+# Copy requirements first to leverage Docker cache
 COPY requirements.txt .
+
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# NLTK verilerini indir
-RUN python -m nltk.downloader vader_lexicon
+# Copy application source code
+COPY src/ ./src/
 
-# Proje dosyalarını kopyala
-COPY . .
+# Set timezone dynamically via build arg or compose
+ENV TZ=Europe/Istanbul
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# Güvenli kullanıcı oluştur (root yetkisinden çık)
-RUN useradd -m quantuser && chown -R quantuser:quantuser /app
+# Create directories for volumes
+RUN mkdir -p logs models data reports
+
+# Create a non-root user
+RUN useradd -m quantuser && \
+    chown -R quantuser:quantuser /app
 USER quantuser
 
-# Sistemi başlat
-CMD ["python", "main.py"]
+# Command to run the engine
+CMD ["python", "-u", "src/main.py"]

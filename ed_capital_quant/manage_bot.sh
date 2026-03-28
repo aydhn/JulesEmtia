@@ -1,32 +1,30 @@
 #!/bin/bash
 
-APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$APP_DIR" || exit
+COMMAND=$1
 
-start() {
-    echo "ED Capital Quant Engine başlatılıyor (Docker)..."
-    docker-compose up -d --build
-}
-
-stop() {
-    echo "ED Capital Quant Engine durduruluyor..."
-    docker-compose down
-}
-
-logs() {
-    echo "Loglar izleniyor... (Çıkmak için Ctrl+C)"
-    docker-compose logs -f
-}
-
-status() {
-    docker-compose ps
-}
-
-case "$1" in
-    start) start ;;
-    stop) stop ;;
-    restart) stop; start ;;
-    logs) logs ;;
-    status) status ;;
-    *) echo "Kullanım: $0 {start|stop|restart|logs|status}"; exit 1 ;;
+case "$COMMAND" in
+    start|deploy)
+        echo "Building and starting ED Capital Quant Engine..."
+        docker-compose up -d --build
+        echo "Bot is now running in the background."
+        ;;
+    stop)
+        echo "Stopping Bot..."
+        docker-compose down
+        ;;
+    restart)
+        echo "Restarting Bot..."
+        docker-compose restart
+        ;;
+    logs)
+        echo "Tailing logs (Ctrl+C to exit)..."
+        docker-compose logs -f --tail=100
+        ;;
+    status)
+        echo "Checking container status..."
+        docker-compose ps
+        ;;
+    *)
+        echo "Usage: ./manage_bot.sh {start|deploy|stop|restart|logs|status}"
+        ;;
 esac

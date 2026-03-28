@@ -1,38 +1,19 @@
-# ED Capital Quant Engine 🚀
+# ED Capital Quant Engine
 
-Düşük frekanslı, yüksek isabet odaklı, tamamen Python tabanlı ve sıfır bütçeli bağımsız algoritmik ticaret motoru. Bu proje ED Capital standartlarında risk yönetimi ve raporlama disiplinine göre inşa edilmiştir.
+## Overview
+A low-frequency, high-win-rate, modular quantitative trading engine built in Python. Designed with a strict zero-budget philosophy, relying entirely on open-source libraries and free data providers.
 
-## Mimari & Özellikler (25 Fazlık Serüvenin Özeti)
-- **Zero-Budget Veri Akışı:** yfinance üzerinden OHLCV ve makro veriler (VIX, DXY, Tahviller).
-- **MTF (Çoklu Zaman Dilimi):** Günlük trend onaylı Saatlik keskin girişler (Sıfır Lookahead Bias).
-- **Gelişmiş Risk Yönetimi (JP Morgan Tarzı):**
-  - Dinamik ATR tabanlı izleyen stop (Trailing Stop).
-  - Breakeven (Başa baş) koruması.
-  - Kesirli Kelly Kriteri (Fractional Kelly) ile pozisyon boyutlandırma.
-- **Siyah Kuğu Koruması:**
-  - VIX endeksi tabanlı devre kesiciler.
-  - Z-Score tabanlı flaş çöküş anomalisi tespiti.
-- **Gerçekçi Maliyetler:** Varlığa özgü dinamik spread ve volatilite bazlı slippage simülasyonu.
-- **Yapay Zeka & NLP Onayı:**
-  - Random Forest sınıflandırıcısıyla teknik sinyallerin istatistiksel doğrulanması.
-  - NLTK (VADER) ile RSS haber duyarlılığının ölçülüp teknik sinyallerle uyumunun test edilmesi.
-- **Güvenli Çift Yönlü İletişim:** Telegram üzerinden raporlama ve acil durum /durdur, /kapat_hepsi komutları.
-- **SPL Düzey 3 Raporlama:** Matplotlib ve PDF destekli kurumsal Tear Sheet ve Monte Carlo Risk Analizi.
+## Architecture & Features
+* **Zero Cost Infrastructure:** Data via `yfinance`, technicals via `pandas_ta`, and reporting via `matplotlib`.
+* **Multi-Timeframe Confluence (MTF):** Strict daily trend alignment before hourly execution. Zero lookahead bias.
+* **Macro Regime Filtering:** VIX circuit breakers, DXY/TNX headwinds veto, and Z-Score flash crash detection.
+* **Risk Management:** Dynamic ATR-based trailing stops, Fractional Kelly Criterion position sizing, and correlation duplication vetos.
+* **Machine Learning Validation:** Random Forest Classifier to filter historically low-probability technical setups.
+* **Fundamental Analysis:** NLTK VADER sentiment analysis on RSS news feeds.
+* **Execution Realism:** Dynamic spread and ATR-adjusted slippage modeling.
+* **Reporting:** Tear sheet generation with Monte Carlo Risk of Ruin simulations.
 
-## Kurulum (Docker Üzerinden)
-
-En kolay ve güvenli kurulum yöntemi Docker kullanmaktır:
-
-1. Depoyu klonlayın.
-2. `ed_capital_quant` dizinine girin.
-3. `.env.example` dosyasını `.env` olarak kopyalayın ve içerisindeki `TELEGRAM_BOT_TOKEN` ile `ADMIN_CHAT_ID` bilgilerinizi (kendi ID'niz) doldurun.
-4. Sisteme çalışma izni verin: `chmod +x manage_bot.sh`
-5. Başlatın: `./manage_bot.sh start`
-
-## Klasör Yapısı
-
-- `core/`: Loglama, veritabanı bağlantısı ve Broker (işlem iletim) soyutlaması.
-- `data_engine/`: MTF veri çekimi, makro ekonomik veri ve haber/NLP duyarlılık analizleri.
-- `strategy/`: Sinyal üretim, teknik indikatörler, ML doğrulaması ve Risk/Kelly boyutlandırması.
-- `analysis/`: Rapor üretimi (Tear Sheet), portföy yönetimi (Korelasyon) ve Monte Carlo testleri.
-- `db/`, `logs/`, `reports/`, `models/`: Docker kalıcı disk (volume) klasörleri.
+## Quick Start
+1. Copy `.env.example` to `.env` and configure your Telegram token and Chat ID.
+2. Ensure Docker and Docker Compose are installed.
+3. Run `./manage_bot.sh deploy` to build and start the engine in detached mode.
