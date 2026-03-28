@@ -1,25 +1,27 @@
 FROM python:3.10-slim
 
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
-
+# Çalışma dizinini ayarla
 WORKDIR /app
-COPY requirements.txt .
 
-RUN apt-get update && apt-get install -y --no-install-recommends gcc python3-dev \
-    && pip install --upgrade pip \
-    && pip install -r requirements.txt \
-    && apt-get remove -y gcc python3-dev \
-    && apt-get autoremove -y \
+# Gerekli OS kütüphanelerini yükle (pdfkit için wkhtmltopdf dahil)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    wkhtmltopdf \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python -c "import nltk; nltk.download('vader_lexicon')"
+# Bağımlılıkları kopyala ve yükle
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
+# NLTK verilerini indir
+RUN python -m nltk.downloader vader_lexicon
+
+# Proje dosyalarını kopyala
 COPY . .
 
-# Best Practice: Run as non-root
-RUN useradd -m -r -s /bin/bash ed_user
-RUN chown -R ed_user:ed_user /app
+# Güvenli kullanıcı oluştur (root yetkisinden çık)
+RUN useradd -m quantuser && chown -R quantuser:quantuser /app
+USER quantuser
 
-USER ed_user
+# Sistemi başlat
 CMD ["python", "main.py"]

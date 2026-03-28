@@ -1,9 +1,43 @@
+# Ortam Değişkenleri
 .env
-*.db
-*.sqlite3
-logs/
+
+# Veritabanı ve Loglar
+db/paper_db.sqlite3
+db/*.db
+logs/*.log
+
+# Modeller
+models/*.pkl
+models/*.joblib
+
+# Raporlar
+reports/*.pdf
+reports/*.html
+reports/*.png
+
+# Python
 __pycache__/
-*.pyc
-*.pkl
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
 .vscode/
-venv/
+.idea/
