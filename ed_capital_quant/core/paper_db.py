@@ -36,6 +36,14 @@ class PaperDB:
         query = "SELECT * FROM trades WHERE status = 'OPEN'"
         return pd.read_sql(query, self.conn)
 
+    def get_closed_trades(self):
+        query = "SELECT * FROM trades WHERE status = 'CLOSED'"
+        return pd.read_sql(query, self.conn)
+
+    def get_all_trades(self):
+        query = "SELECT * FROM trades"
+        return pd.read_sql(query, self.conn)
+
     def update_sl(self, trade_id: int, new_sl: float):
         query = "UPDATE trades SET sl_price = ? WHERE trade_id = ?"
         self.conn.execute(query, (new_sl, trade_id))
