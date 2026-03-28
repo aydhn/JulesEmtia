@@ -24,19 +24,28 @@ A low-frequency, high-win-rate, zero-budget, multi-timeframe quantitative tradin
 
 ## Installation & Deployment
 
+### Virtual Environment (Local)
+1. `python3 -m venv venv`
+2. `source venv/bin/activate`
+3. `pip install -r requirements.txt`
+
 ### Docker (Recommended)
 ```bash
+chmod +x deploy.sh
 ./deploy.sh
 ```
 
-### Local / Systemd
+### Systemd (Linux Background Daemon)
 ```bash
-pip install -r requirements.txt
+chmod +x manage_bot.sh
+sudo cp systemd/quant_bot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable quant_bot
 ./manage_bot.sh start
 ```
 
 ### Security
-Ensure you configure the `.env` file before starting the engine:
+Ensure you configure the `.env` file before starting the engine. NEVER commit your `.env` file or SQLite database.
 ```
 TELEGRAM_BOT_TOKEN=your_token
 ADMIN_CHAT_ID=your_id

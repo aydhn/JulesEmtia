@@ -9,6 +9,7 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./models:/app/models
+      # Important to prevent overwriting paper DB on restart
       - paper_db_volume:/app/paper_db.sqlite3
     environment:
       - TZ=${TZ:-Europe/Istanbul}

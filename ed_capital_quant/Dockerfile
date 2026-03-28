@@ -17,6 +17,7 @@ RUN python -c "import nltk; nltk.download('vader_lexicon')"
 
 COPY . .
 
+# Best Practice: Run as non-root
 RUN useradd -m -r -s /bin/bash ed_user
 RUN chown -R ed_user:ed_user /app
 

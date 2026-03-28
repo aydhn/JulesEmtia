@@ -1,24 +1,32 @@
 #!/bin/bash
+# Phase 9: Systemd & Session Management
+SERVICE_NAME="quant_bot"
+
 case "$1" in
     start)
-        sudo systemctl start quant_bot
-        echo "Başlatıldı."
+        sudo systemctl start $SERVICE_NAME
+        echo "🟢 ED Capital Quant Engine Başlatıldı."
         ;;
     stop)
-        sudo systemctl stop quant_bot
-        echo "Durduruldu."
+        sudo systemctl stop $SERVICE_NAME
+        echo "🔴 ED Capital Quant Engine Durduruldu."
         ;;
     restart)
-        sudo systemctl restart quant_bot
-        echo "Yeniden başlatıldı."
+        sudo systemctl restart $SERVICE_NAME
+        echo "🔄 ED Capital Quant Engine Yeniden Başlatıldı."
         ;;
     status)
-        sudo systemctl status quant_bot
+        sudo systemctl status $SERVICE_NAME
         ;;
     logs)
-        journalctl -u quant_bot -f
+        sudo journalctl -u $SERVICE_NAME -f
+        ;;
+    tmux-fallback)
+        echo "Systemd yoksa B-Planı: Tmux ile başlatılıyor..."
+        tmux new-session -d -s ed_quant 'python3 main.py'
+        echo "Tmux session başlatıldı. Bağlanmak için: tmux attach -t ed_quant"
         ;;
     *)
-        echo "Kullanım: $0 {start|stop|restart|status|logs}"
+        echo "Kullanım: \$0 {start|stop|restart|status|logs|tmux-fallback}"
         ;;
 esac
