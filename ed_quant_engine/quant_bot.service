@@ -1,0 +1,20 @@
+[Unit]
+Description=ED Capital Quant Engine Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/ed_quant_engine
+ExecStart=/usr/bin/python3 main.py
+Restart=always
+RestartSec=10
+Environment=TZ=Europe/Istanbul
+
+# Logging
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=quant_bot
+
+[Install]
+WantedBy=multi-user.target

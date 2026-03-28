@@ -1,9 +1,8 @@
 version: '3.8'
-
 services:
   quant_engine:
     build: .
-    container_name: ed_quant_bot
+    container_name: edcapital_quant
     restart: always
     environment:
       - TZ=Europe/Istanbul
@@ -12,5 +11,3 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - ./models:/app/models
-      - ./reports:/app/reports
