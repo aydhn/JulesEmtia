@@ -1,34 +1,31 @@
 FROM python:3.10-slim
 
-# Install OS dependencies for building ML and basic network tools
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TZ=Europe/Istanbul
 
-# Set working directory
 WORKDIR /app
 
-# Copy requirements first to leverage Docker cache
-COPY requirements.txt .
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    wkhtmltopdf \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
+# Install python dependencies
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application source code
-COPY src/ ./src/
-
-# Set timezone dynamically via build arg or compose
-ENV TZ=Europe/Istanbul
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
-
-# Create directories for volumes
-RUN mkdir -p logs models data reports
-
-# Create a non-root user
-RUN useradd -m quantuser && \
+# Create non-root user
+RUN useradd -m -r -u 1000 quantuser
+RUN mkdir -p /app/logs /app/data_storage /app/reports && \
     chown -R quantuser:quantuser /app
+
+# Switch to non-root user
 USER quantuser
 
-# Command to run the engine
-CMD ["python", "-u", "src/main.py"]
+# Copy application code
+COPY --chown=quantuser:quantuser . .
+
+# Run the application
+CMD ["python", "main.py"]
