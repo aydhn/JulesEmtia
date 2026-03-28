@@ -1,30 +1,17 @@
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
-
-# Trading Universe (Tickers)
-UNIVERSE = {
-    'METALS': ['GC=F', 'SI=F', 'HG=F', 'PA=F', 'PL=F'],
-    'ENERGY': ['CL=F', 'BZ=F', 'NG=F', 'HO=F', 'RB=F'],
-    'AGRICULTURE': ['ZW=F', 'ZC=F', 'ZS=F', 'KC=F', 'CC=F', 'SB=F', 'CT=F'],
-    'FOREX_TRY': ['USDTRY=X', 'EURTRY=X', 'GBPTRY=X', 'JPYTRY=X', 'CNYTRY=X', 'CHFTRY=X', 'AUDTRY=X'],
+# ED Capital - Universe & Risk Configurations
+TICKERS = {
+    "METALS": ["GC=F", "SI=F", "HG=F", "PA=F", "PL=F"],
+    "ENERGY": ["CL=F", "BZ=F", "NG=F", "HO=F", "RB=F"],
+    "AGRI":   ["ZW=F", "ZC=F", "ZS=F", "KC=F", "CC=F", "SB=F", "CT=F"],
+    "FX_TRY": ["USDTRY=X", "EURTRY=X", "GBPTRY=X", "JPYTRY=X", "CNHY=X", "CHFTRY=X"]
 }
 
-SPREADS = {"METALS": 0.0002, "ENERGY": 0.0003, "AGRICULTURE": 0.0005, "FOREX_TRY": 0.0010}
+# Risk Limits (Phase 11 & 15)
+MAX_OPEN_POSITIONS = 4
+MAX_TOTAL_RISK_PCT = 0.06
+FRACTIONAL_KELLY = 0.5
+HARD_CAP_PCT = 0.04
+CORRELATION_THRESHOLD = 0.75
 
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID')
-
-DB_NAME = 'paper_db.sqlite3'
-LOG_DIR = 'logs'
-MODELS_DIR = 'models'
-
-# Risk Parameters
-INITIAL_CAPITAL = 10000.0
-MAX_OPEN_POSITIONS = 3
-MAX_GLOBAL_EXPOSURE = 0.06
-MAX_CORRELATION = 0.75
-
-os.makedirs(LOG_DIR, exist_ok=True)
-os.makedirs(MODELS_DIR, exist_ok=True)
+# Spreads (Phase 21)
+BASE_SPREADS = {"METALS": 0.0002, "ENERGY": 0.0003, "AGRI": 0.0005, "FX_TRY": 0.0010}
