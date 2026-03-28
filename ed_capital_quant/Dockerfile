@@ -1,34 +1,24 @@
-# Dockerfile
 FROM python:3.10-slim
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
 
-# Create a secure, non-root user
-RUN adduser --disabled-password --gecos '' quantuser
-
-# Set working directory
 WORKDIR /app
+COPY requirements.txt .
 
-# Install build dependencies (often needed for TA-Lib or C-extensions, though we use pandas_ta)
-RUN apt-get update && apt-get install -y \
-    build-essential \
+RUN apt-get update && apt-get install -y --no-install-recommends gcc python3-dev \
+    && pip install --upgrade pip \
+    && pip install -r requirements.txt \
+    && apt-get remove -y gcc python3-dev \
+    && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install them
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -c "import nltk; nltk.download('vader_lexicon')"
 
-# Copy the application source code
 COPY . .
 
-# Ensure correct permissions for the non-root user
-RUN mkdir -p /app/logs /app/models \
-    && chown -R quantuser:quantuser /app
+RUN useradd -m -r -s /bin/bash ed_user
+RUN chown -R ed_user:ed_user /app
 
-# Switch to the non-root user
-USER quantuser
-
-# Run the application
+USER ed_user
 CMD ["python", "main.py"]

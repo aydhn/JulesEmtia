@@ -1,106 +1,49 @@
-"""
-ED Capital Quant Engine - Local Paper Trade Database
-Lightweight SQLite structure to persist trade states.
-"""
 import sqlite3
-import os
-from .logger import logger
-from .config import DB_NAME
+import pandas as pd
+from core.config import DB_NAME
 
-class PaperTradeDatabase:
-    def __init__(self, db_path=DB_NAME):
-        self.db_path = db_path
-        self._init_db()
+class PaperDB:
+    def __init__(self, db_name=DB_NAME):
+        self.conn = sqlite3.connect(db_name, check_same_thread=False)
+        self.create_table()
 
-    def _init_db(self):
-        """Create trades table if it doesn't exist."""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS trades (
-                        trade_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        ticker TEXT NOT NULL,
-                        direction TEXT NOT NULL,
-                        entry_time TEXT NOT NULL,
-                        entry_price REAL NOT NULL,
-                        sl_price REAL NOT NULL,
-                        tp_price REAL NOT NULL,
-                        position_size REAL NOT NULL,
-                        status TEXT NOT NULL DEFAULT 'Open',
-                        exit_time TEXT,
-                        exit_price REAL,
-                        pnl REAL
-                    )
-                ''')
-                conn.commit()
-                logger.info(f"Database initialized at {self.db_path}")
-        except sqlite3.Error as e:
-            logger.critical(f"Database initialization failed: {e}")
+    def create_table(self):
+        query = """
+        CREATE TABLE IF NOT EXISTS trades (
+            trade_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT,
+            direction INTEGER,
+            entry_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            entry_price REAL,
+            sl_price REAL,
+            tp_price REAL,
+            position_size REAL,
+            status TEXT DEFAULT 'OPEN',
+            exit_time TIMESTAMP,
+            exit_price REAL,
+            pnl REAL
+        )
+        """
+        self.conn.execute(query)
+        self.conn.commit()
 
-    def open_trade(self, ticker, direction, entry_time, entry_price, sl_price, tp_price, position_size):
-        """Open a new paper trade and record it."""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT INTO trades (ticker, direction, entry_time, entry_price, sl_price, tp_price, position_size, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'Open')
-                ''', (ticker, direction, entry_time, entry_price, sl_price, tp_price, position_size))
-                trade_id = cursor.lastrowid
-                conn.commit()
-                logger.info(f"Trade Opened: {ticker} {direction} @ {entry_price} (SL: {sl_price}, TP: {tp_price}, Size: {position_size}) - ID: {trade_id}")
-                return trade_id
-        except sqlite3.Error as e:
-            logger.error(f"Failed to open trade for {ticker}: {e}")
-            return None
-
-    def close_trade(self, trade_id, exit_time, exit_price, pnl):
-        """Close an existing paper trade and calculate PnL."""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    UPDATE trades
-                    SET status = 'Closed', exit_time = ?, exit_price = ?, pnl = ?
-                    WHERE trade_id = ?
-                ''', (exit_time, exit_price, pnl, trade_id))
-                conn.commit()
-                logger.info(f"Trade Closed: ID {trade_id} @ {exit_price} - PnL: {pnl}")
-                return True
-        except sqlite3.Error as e:
-            logger.error(f"Failed to close trade ID {trade_id}: {e}")
-            return False
+    def open_trade(self, ticker: str, direction: int, entry_price: float, sl: float, tp: float, size: float):
+        query = "INSERT INTO trades (ticker, direction, entry_price, sl_price, tp_price, position_size) VALUES (?, ?, ?, ?, ?, ?)"
+        self.conn.execute(query, (ticker, direction, entry_price, sl, tp, size))
+        self.conn.commit()
 
     def get_open_trades(self):
-        """Fetch all trades currently with 'Open' status."""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
-                cursor.execute("SELECT * FROM trades WHERE status = 'Open'")
-                rows = cursor.fetchall()
-                # Convert rows to dictionaries
-                return [dict(row) for row in rows]
-        except sqlite3.Error as e:
-            logger.error(f"Failed to fetch open trades: {e}")
-            return []
+        query = "SELECT * FROM trades WHERE status = 'OPEN'"
+        return pd.read_sql(query, self.conn)
 
-    def update_sl_price(self, trade_id, new_sl):
-        """Dinamik izleyen stop-loss güncellemesi."""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    UPDATE trades
-                    SET sl_price = ?
-                    WHERE trade_id = ?
-                ''', (new_sl, trade_id))
-                conn.commit()
-                logger.info(f"SL Updated: ID {trade_id} to {new_sl}")
-                return True
-        except sqlite3.Error as e:
-            logger.error(f"Failed to update SL for trade ID {trade_id}: {e}")
-            return False
+    def update_sl(self, trade_id: int, new_sl: float):
+        query = "UPDATE trades SET sl_price = ? WHERE trade_id = ?"
+        self.conn.execute(query, (new_sl, trade_id))
+        self.conn.commit()
 
-db = PaperTradeDatabase()
+    def close_trade(self, trade_id: int, exit_price: float, pnl: float):
+        query = "UPDATE trades SET status = 'CLOSED', exit_time = CURRENT_TIMESTAMP, exit_price = ?, pnl = ? WHERE trade_id = ?"
+        self.conn.execute(query, (exit_price, pnl, trade_id))
+        self.conn.commit()
+
+db = PaperDB()
