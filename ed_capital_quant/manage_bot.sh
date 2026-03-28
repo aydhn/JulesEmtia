@@ -1,14 +1,12 @@
 #!/bin/bash
+# ED Capital Quant Engine Management Script
+COMMAND=$1
 
-# manage_bot.sh - ED Capital Quant Engine Management Script
-
-set -e
-
-action=$1
-
-case $action in
+case $COMMAND in
   start)
     echo "Starting ED Capital Quant Engine..."
+    mkdir -p data logs
+    chmod 777 data logs
     docker-compose up -d --build
     ;;
   stop)
@@ -18,18 +16,17 @@ case $action in
   restart)
     echo "Restarting ED Capital Quant Engine..."
     docker-compose down
+    mkdir -p data logs
+    chmod 777 data logs
     docker-compose up -d --build
     ;;
   logs)
-    docker-compose logs -f quant_engine
+    docker-compose logs -f
     ;;
   status)
     docker-compose ps
     ;;
-  shell)
-    docker-compose exec quant_engine /bin/bash
-    ;;
   *)
-    echo "Usage: ./manage_bot.sh {start|stop|restart|logs|status|shell}"
+    echo "Usage: ./manage_bot.sh {start|stop|restart|logs|status}"
     ;;
 esac
