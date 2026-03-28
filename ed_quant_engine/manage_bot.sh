@@ -1,28 +1,26 @@
 #!/bin/bash
-# Phase 9 & 25: Management Script
+# Phase 9: Management Script for Local (Tmux/Systemd fallback)
 
-COMMAND=$1
+ACTION=$1
 
-case "$COMMAND" in
-    start)
-        echo "Starting ED Capital Quant Engine via Docker Compose..."
-        docker-compose up -d --build
-        ;;
-    stop)
-        echo "Stopping Engine..."
-        docker-compose down
-        ;;
-    logs)
-        docker-compose logs -f --tail=100
-        ;;
-    restart)
-        echo "Restarting Engine..."
-        docker-compose down
-        docker-compose up -d --build
-        ;;
-    status)
-        docker-compose ps
-        ;;
-    *)
-        echo "Usage: ./manage_bot.sh {start|stop|restart|logs|status}"
+case $ACTION in
+  start)
+    echo "Starting ED Quant Engine in background (Tmux)..."
+    tmux new-session -d -s quant_bot "source venv/bin/activate && python main.py"
+    echo "Started. Use 'tmux attach -t quant_bot' to view."
+    ;;
+  stop)
+    echo "Stopping ED Quant Engine..."
+    tmux kill-session -t quant_bot
+    echo "Stopped."
+    ;;
+  logs)
+    cat logs/quant_engine.log | tail -n 50
+    ;;
+  status)
+    tmux ls | grep quant_bot
+    ;;
+  *)
+    echo "Usage: ./manage_bot.sh {start|stop|logs|status}"
+    ;;
 esac
