@@ -1,0 +1,19 @@
+version: '3.8'
+services:
+  quant_engine:
+    build:
+      context: ..
+      dockerfile: devops/Dockerfile
+    container_name: ed_capital_quant
+    restart: always
+    environment:
+      - TZ=Europe/Istanbul
+    env_file:
+      - ../.env
+    volumes:
+      - quant_db_volume:/app/paper_db.sqlite3
+      - quant_logs_volume:/app/logs/
+
+volumes:
+  quant_db_volume:
+  quant_logs_volume:

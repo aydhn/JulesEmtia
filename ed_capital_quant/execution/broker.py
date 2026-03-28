@@ -1,29 +1,25 @@
 from abc import ABC, abstractmethod
-from core.paper_db import db
-from utils.logger import log
+from core.paper_db import PaperDB
+from execution.execution_model import calculate_execution_price
+import datetime
 
 class BaseBroker(ABC):
     @abstractmethod
-    def place_market_order(self, ticker: str, direction: int, price: float, sl: float, tp: float, size: float):
-        pass
+    def place_order(self, ticker, direction, price, atr, category, size, sl, tp): pass
 
 class PaperBroker(BaseBroker):
-    def place_market_order(self, ticker: str, direction: int, price: float, sl: float, tp: float, size: float):
-        # Phase 24: SPL Düzey 3 Audit Trail
-        receipt = {
-            "type": "MARKET",
-            "ticker": ticker,
-            "direction": "LONG" if direction == 1 else "SHORT",
-            "execution_price": price,
-            "sl": sl,
-            "tp": tp,
-            "size": size,
-            "status": "FILLED"
+    def __init__(self, db: PaperDB):
+        self.db = db
+
+    def place_order(self, ticker, direction, price, atr, category, size, sl, tp):
+        exec_price = calculate_execution_price(price, atr, category, direction)
+
+        trade_receipt = {
+            "ticker": ticker, "direction": direction,
+            "entry_time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "entry_price": exec_price, "sl_price": sl, "tp_price": tp,
+            "position_size": size, "status": "Open",
+            "exit_time": None, "exit_price": None, "pnl": None
         }
-        log.info(f"🧾 Emir İletim Fişi (Execution Receipt): {receipt}")
-
-        # Save to local DB representing the execution
-        db.open_trade(ticker, direction, price, sl, tp, size)
-
-# Dependency Injection logic placeholder for real systems (e.g. BinanceBroker)
-broker = PaperBroker()
+        self.db.open_trade(trade_receipt)
+        return trade_receipt

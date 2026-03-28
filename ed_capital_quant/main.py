@@ -1,247 +1,215 @@
-import schedule
-import time
 import asyncio
 import gc
-from data.data_loader import get_mtf_data
-from features.indicators import add_features
-from strategy.signals import generate_signals, calc_dynamic_sl_tp
-from core.ml_validator import validate_signal
-from execution.execution_model import apply_slippage_and_spread
-from execution.broker import broker
-from core.paper_db import db
-from core.config import UNIVERSE, INITIAL_CAPITAL, MAX_OPEN_POSITIONS, MAX_GLOBAL_EXPOSURE, MAX_CORRELATION
-from execution.portfolio import calculate_position_size, calculate_correlation, is_correlated
-from utils.notifier import send_msg, start_polling, STATE
-from utils.logger import log
-from data.macro_filter import check_vix_circuit_breaker
-from analytics.reporter import generate_tear_sheet
-from core.ml_validator import train_model
+import os
+import schedule
+import pandas as pd
+from core.paper_db import PaperDB
+from core.notifier import TelegramNotifier
+from data.data_loader import DataLoader
+from data.macro_filter import MacroRegime
+from data.sentiment_filter import SentimentFilter
+from quant.features import add_features
+from quant.strategy import StrategyEngine
+from quant.portfolio_mgr import PortfolioManager
+from quant.ml_validator import MLValidator
+from execution.broker import PaperBroker
+from core.config import TICKERS
+from core.logger import logger
+from quant.reporter import Reporter
+from quant.monte_carlo import MonteCarloSimulator
+import datetime
+
+db = PaperDB()
+notifier = TelegramNotifier(db)
+broker = PaperBroker(db)
+portfolio = PortfolioManager(db)
+ml_engine = MLValidator()
+sentiment_engine = SentimentFilter()
+reporter = Reporter(db)
+
+async def manage_open_trades():
+    open_trades = db.get_open_trades()
+    for _, trade in open_trades.iterrows():
+        df = DataLoader.fetch_data(trade['ticker'], "1h", "5d", retries=1)
+        if df.empty: continue
+
+        try:
+            current_price = df['Close'].iloc[-1].item() if not isinstance(df.columns, pd.MultiIndex) else df['Close'].iloc[-1, 0].item()
+
+            import pandas_ta as ta
+            df_ta = df.copy()
+            if isinstance(df_ta.columns, pd.MultiIndex):
+                df_ta.columns = [c[0] for c in df_ta.columns]
+            atr = df_ta.ta.atr(length=14).iloc[-1].item()
+        except Exception as e:
+            logger.error(f"Error managing trade {trade['ticker']}: {e}")
+            continue
+
+        if MacroRegime.check_black_swan() or MacroRegime.is_flash_crash(df):
+            pnl = (current_price - trade['entry_price']) if trade['direction'] == "Long" else (trade['entry_price'] - current_price)
+            db.close_trade(trade['trade_id'], current_price, datetime.datetime.now().isoformat(), pnl)
+            await notifier.send_message(f"🚨 <b>DEVRE KESİCİ ÇIKIŞI</b>\n{trade['ticker']} kapatıldı. PNL: {pnl:.2f}")
+            continue
+
+        hit_sl = (trade['direction'] == "Long" and current_price <= trade['sl_price']) or \
+                 (trade['direction'] == "Short" and current_price >= trade['sl_price'])
+        hit_tp = (trade['direction'] == "Long" and current_price >= trade['tp_price']) or \
+                 (trade['direction'] == "Short" and current_price <= trade['tp_price'])
+
+        if hit_sl or hit_tp:
+            pnl = (current_price - trade['entry_price']) * trade['position_size'] if trade['direction'] == "Long" else (trade['entry_price'] - current_price) * trade['position_size']
+            db.close_trade(trade['trade_id'], current_price, datetime.datetime.now().isoformat(), pnl)
+            await notifier.send_message(f"✅ <b>İŞLEM KAPANDI</b>\n{trade['ticker']} PNL: {pnl:.2f}")
+        else:
+            new_sl = StrategyEngine.manage_trailing_stop(trade, current_price, atr)
+            if new_sl != trade['sl_price']:
+                db.update_sl(trade['trade_id'], new_sl)
+                if new_sl == trade['entry_price']:
+                    await notifier.send_message(f"🔒 <b>RİSK SIFIRLANDI</b>\n{trade['ticker']} SL Başa Başa Çekildi.")
+
+def _run_live_cycle_sync():
+    """Wrapper to run the async cycle from the synchronous scheduler"""
+    asyncio.create_task(run_live_cycle())
+
+def _generate_weekly_report():
+    """Wrapper to generate weekly report via async notifier"""
+    asyncio.create_task(send_weekly_report())
+
+async def send_weekly_report():
+    report_path = reporter.generate_tear_sheet()
+    await notifier.send_message(f"📊 <b>Haftalık ED Capital Raporu Oluşturuldu!</b>\nKonumu: {report_path}")
 
 async def panic_close_all():
     open_trades = db.get_open_trades()
-    if open_trades.empty:
-        await send_msg("Kapatılacak açık işlem yok.")
-        return
-
     for _, trade in open_trades.iterrows():
-        trade_id = trade['trade_id']
-        ticker = trade['ticker']
-        dir_val = trade['direction']
-        size = trade['position_size']
-        entry = trade['entry_price']
-
-        df = get_mtf_data(ticker)
+        df = DataLoader.fetch_data(trade['ticker'], "1h", "1d", retries=1)
         if df.empty: continue
-        current_price = df['Close'].iloc[-1]
+        current_price = df['Close'].iloc[-1].item() if not isinstance(df.columns, pd.MultiIndex) else df['Close'].iloc[-1, 0].item()
+        pnl = (current_price - trade['entry_price']) * trade['position_size'] if trade['direction'] == "Long" else (trade['entry_price'] - current_price) * trade['position_size']
+        db.close_trade(trade['trade_id'], current_price, datetime.datetime.now().isoformat(), pnl)
+        await notifier.send_message(f"🚨 <b>PANİK KAPATMASI</b>\n{trade['ticker']} piyasa fiyatından kapatıldı. PNL: {pnl:.2f}")
 
-        # SL/TP calculation mock for slippage
-        risk_dist = abs(entry - trade['sl_price'])
-        exit_price = apply_slippage_and_spread(ticker, current_price, risk_dist/1.5 if risk_dist > 0 else 0, direction=-dir_val)
-
-        if dir_val == 1: pnl = (exit_price - entry) * size
-        else: pnl = (entry - exit_price) * size
-
-        db.close_trade(trade_id, exit_price, pnl)
-
-    await send_msg("🚨 PANİK MODU: Tüm İşlemler Kapatıldı.")
-    STATE["panic_close"] = False
-
-async def check_open_positions(current_prices: dict):
-    open_trades = db.get_open_trades()
-    for _, trade in open_trades.iterrows():
-        ticker = trade['ticker']
-        if ticker not in current_prices: continue
-
-        current_price = current_prices[ticker]
-        direction = trade['direction']
-        sl = trade['sl_price']
-        tp = trade['tp_price']
-        entry = trade['entry_price']
-        size = trade['position_size']
-        trade_id = trade['trade_id']
-
-        # Risk_dist equivalent to 1.5 ATR (from calc_dynamic_sl_tp)
-        risk_dist = abs(entry - sl)
-
-        # Phase 12: Breakeven & Trailing Stop strictly monotonic
-        if direction == 1:
-            # Breakeven: if price moved 1x SL distance in our favor
-            if current_price >= entry + risk_dist and sl < entry:
-                db.update_sl(trade_id, entry)
-                await send_msg(f"🔒 Risk Sıfırlandı: {ticker} SL giriş fiyatına çekildi.")
-
-            # Trailing Stop: Move SL up if price made new high
-            new_sl = current_price - (1.5 * risk_dist)
-            if new_sl > sl and new_sl > entry:
-                db.update_sl(trade_id, new_sl)
-
-        else: # Short
-            # Breakeven
-            if current_price <= entry - risk_dist and sl > entry:
-                db.update_sl(trade_id, entry)
-                await send_msg(f"🔒 Risk Sıfırlandı: {ticker} SL giriş fiyatına çekildi.")
-
-            # Trailing Stop
-            new_sl = current_price + (1.5 * risk_dist)
-            if new_sl < sl and new_sl < entry:
-                db.update_sl(trade_id, new_sl)
-
-        # EXIT LOGIC
-        closed = False
-        pnl = 0.0
-
-        if direction == 1:
-            if current_price <= sl:
-                closed = True
-                pnl = (sl - entry) * size
-            elif current_price >= tp:
-                closed = True
-                pnl = (tp - entry) * size
-        else:
-            if current_price >= sl:
-                closed = True
-                pnl = (entry - sl) * size
-            elif current_price <= tp:
-                closed = True
-                pnl = (entry - tp) * size
-
-        if closed:
-            exit_price = apply_slippage_and_spread(ticker, current_price, risk_dist/1.5, direction=-direction)
-            if direction == 1: pnl = (exit_price - entry) * size
-            else: pnl = (entry - exit_price) * size
-
-            db.close_trade(trade_id, exit_price, pnl)
-            await send_msg(f"🔒 İşlem Kapandı: {ticker} | PnL: ${pnl:.2f}")
-
-async def run_cycle():
-    if STATE["panic_close"]:
-        await panic_close_all()
-
-    if STATE["paused"]:
-        log.info("Sistem duraklatılmış durumda. Sadece açık pozisyonlar güncellenecek.")
-
-    flat_tickers = [t for group in UNIVERSE.values() for t in group]
-    current_prices = {}
-
-    log.info("ED Capital Engine: Döngü Başladı")
-
-    open_trades = db.get_open_trades()
-    open_tickers = open_trades['ticker'].tolist() if not open_trades.empty else []
-
-    # Phase 19: VIX Circuit Breaker blocks NEW trades, but open trades continue to be checked
-    vix_breaker_active = check_vix_circuit_breaker()
-
-    # Pre-fetch prices to check stops
-    for ticker in flat_tickers:
-        try:
-            df = get_mtf_data(ticker)
-            if not df.empty:
-                current_prices[ticker] = df['Close'].iloc[-1]
-        except Exception as e:
-            log.error(f"Fiyat çekme hatası ({ticker}): {e}")
-
-    await check_open_positions(current_prices)
-
-    if STATE["paused"] or vix_breaker_active:
-        return # Skip new trade scanning
-
-    if len(open_tickers) >= MAX_OPEN_POSITIONS:
-        log.warning("Maksimum açık pozisyon sınırına ulaşıldı.")
+async def run_live_cycle():
+    logger.info("Canlı Döngü Tetiklendi.")
+    if notifier.is_paused:
+        logger.info("Sistem duraklatılmış durumda (Paused). Sinyal taranmıyor.")
         return
 
-    # Phase 11: Correlation
-    corr_matrix = calculate_correlation(flat_tickers)
+    if MacroRegime.check_black_swan():
+        return
 
-    for ticker in flat_tickers:
-        try:
-            df = get_mtf_data(ticker)
-            if df.empty: continue
+    await manage_open_trades()
+
+    if len(db.get_open_trades()) >= 4:
+        logger.info("Maksimum pozisyon limitine ulaşıldı.")
+        return
+
+    sentiment_score = sentiment_engine.get_market_sentiment()
+    current_capital = 10000.0 # Could fetch from DB
+
+    # Calculate historical stats for Kelly Criterion
+    closed_trades = pd.read_sql("SELECT * FROM trades WHERE status='Closed' ORDER BY exit_time DESC LIMIT 50", db.conn)
+    win_rate, avg_win, avg_loss = 0.5, 0.0, 0.0
+    if not closed_trades.empty:
+        wins = closed_trades[closed_trades['pnl'] > 0]
+        losses = closed_trades[closed_trades['pnl'] < 0]
+        win_rate = len(wins) / len(closed_trades)
+        avg_win = wins['pnl'].mean() if not wins.empty else 0
+        avg_loss = abs(losses['pnl'].mean()) if not losses.empty else 0
+
+    kelly_pct = portfolio.kelly_criterion(win_rate, avg_win, avg_loss)
+    # Fallback to minimal fixed risk if no history or negative Kelly
+    if kelly_pct <= 0:
+        kelly_pct = 0.005
+
+    for category, ticker_list in TICKERS.items():
+        for ticker in ticker_list:
+            # Recheck limits inside loop
+            if len(db.get_open_trades()) >= 4: break
+
+            df = DataLoader.get_mtf_data(ticker)
+            if df is None or df.empty: continue
 
             df = add_features(df)
-            signal = generate_signals(df, ticker)
+            signal = StrategyEngine.check_signal(df)
 
-            if signal != 0:
-                # Phase 18: Machine Learning Validation
-                if not validate_signal(df):
-                    log.info(f"ML Vetosu: {ticker} modeli geçemedi.")
+            if signal:
+                # 1. Macro Regime Filter (e.g. Risk-Off DXY/TNX vetoes Longs)
+                if MacroRegime.veto_signal(signal, ticker):
                     continue
 
-                # Phase 11: Correlation Check
-                if is_correlated(ticker, open_tickers, corr_matrix, MAX_CORRELATION):
-                    log.info(f"Korelasyon Vetosu: {ticker} risk duplikasyonu.")
+                # 2. Sentiment Veto
+                if (signal == "Long" and sentiment_score < -0.2) or (signal == "Short" and sentiment_score > 0.2):
+                    logger.info(f"Sentiment Vetosu: {ticker} {signal} reddedildi.")
                     continue
 
-                entry_raw = df['Close'].iloc[-1]
-                atr = df['ATRr_14'].iloc[-1] if 'ATRr_14' in df.columns else df['ATR_14'].iloc[-1]
+                # 3. Correlation Veto
+                # For simplicity in live cycle, passing the universe df representing just this asset.
+                # In real scenario, a global universe df is needed.
+                if portfolio.correlation_veto(ticker, signal, df):
+                    logger.info(f"Korelasyon Vetosu: {ticker} {signal} reddedildi.")
+                    continue
 
-                # Phase 21: Spread and Slippage Modeling
-                entry_real = apply_slippage_and_spread(ticker, entry_raw, atr, signal)
-                sl, tp = calc_dynamic_sl_tp(entry_real, atr, signal)
+                # 4. ML Validation Veto
+                import numpy as np
+                # Extract last features for ML
+                try:
+                    features = df[['RSI_14', 'MACD_12_26_9', 'ATRr_14', 'log_ret']].iloc[-1].fillna(0).values
+                    if not ml_engine.validate_signal(features):
+                        continue
+                except Exception as e:
+                    logger.warning(f"ML extraction failed for {ticker}: {e}")
 
-                # Phase 15: Half-Kelly Sizing
-                size = calculate_position_size(INITIAL_CAPITAL, entry_real, sl)
+                try:
+                    last_price = df['Close'].iloc[-1].item() if 'Close' in df.columns else df.iloc[-1, 0].item()
+                    atr = df['ATRr_14'].iloc[-1].item()
+                except:
+                    continue
 
-                if size > 0:
-                    broker.place_market_order(ticker, signal, entry_real, sl, tp, size)
+                sl, tp = StrategyEngine.calculate_dynamic_risk(last_price, atr, signal)
 
-                    dir_str = "LONG" if signal == 1 else "SHORT"
-                    msg = f"🟢 SİNYAL ONAYLANDI: {ticker} {dir_str}\nGiriş: {entry_real:.4f}\nSL: {sl:.4f} | TP: {tp:.4f}\nBoyut: {size:.2f}"
-                    await send_msg(msg)
-                    log.info(f"Sinyal İşleme Alındı: {ticker} {dir_str}")
+                # Use Kelly Criterion
+                risk_amount = current_capital * kelly_pct
+                lot_size = risk_amount / abs(last_price - sl) if abs(last_price - sl) > 0 else 0
 
-        except Exception as e:
-            log.error(f"Döngü Hatası ({ticker}): {e}")
+                if lot_size > 0:
+                    receipt = broker.place_order(ticker, signal, last_price, atr, category, lot_size, sl, tp)
+                    await notifier.send_message(f"🟢 <b>YENİ SİNYAL ONAYLANDI</b>\nTicker: {ticker}\nYön: {signal}\nFiyat: {receipt['entry_price']:.2f}\nSL: {sl:.2f}\nTP: {tp:.2f}\nLot: {lot_size:.2f}\nKelly Pct: {kelly_pct:.4f}")
 
-    STATE["force_scan"] = False
-
-    # Phase 23: Memory Management (Garbage Collection)
     gc.collect()
+    logger.info("Canlı Döngü Tamamlandı.")
 
-def generate_weekly_report():
-    file_path = generate_tear_sheet()
-    log.info("Haftalık Rapor Oluşturuldu: " + file_path)
+def setup_schedule():
+    schedule.every().hour.at(":00").do(_run_live_cycle_sync)
+    schedule.every().day.at("08:00").do(
+        lambda: asyncio.create_task(notifier.send_message("🟢 <b>Sistem Aktif</b>: Bot 7/24 çalışıyor."))
+    )
+    # Generate weekly report on Friday close (e.g., 23:00)
+    schedule.every().friday.at("23:00").do(_generate_weekly_report)
+    logger.info("Zamanlayıcı (Scheduler) ayarlandı.")
 
-def retrain_ml_model():
-    log.info("Haftasonu ML Model Eğitimi Başlıyor...")
-    # Gather massive historical dataframe across universe and retrain
-    # In real deployment, iterate through UNIVERSE and concat dfs
-    # train_model(massive_df)
+async def main_loop():
+    # Pass cycle funcs to notifier if it needs to call them
+    notifier.run_live_cycle = run_live_cycle
+    notifier.panic_close_all = panic_close_all
 
-def job():
-    asyncio.run(run_cycle())
+    if notifier.app:
+        await notifier.app.initialize()
+        await notifier.app.start()
+        await notifier.app.updater.start_polling()
 
-async def background_scheduler():
-    schedule.every().hour.at(":01").do(job)
+    await notifier.send_message("🚀 <b>ED Capital Quant Engine</b> Canlı Paper Trade Modunda Başlatıldı.")
 
-    # Run tear sheet and retraining on Friday night / Saturday
-    schedule.every().friday.at("23:00").do(generate_weekly_report)
-    schedule.every().saturday.at("02:00").do(retrain_ml_model)
+    setup_schedule()
 
-    log.info("Sistem Başlatıldı. Zamanlayıcı ve Telegram aktif.")
-    await send_msg("🚀 ED Capital Quant Engine Canlı Paper Trade Modunda Başlatıldı.")
-
-    # Attempt initial recovery state logic
-    open_trades = db.get_open_trades()
-    log.info(f"State Recovery: {len(open_trades)} adet açık pozisyon bulundu ve izleniyor.")
+    await run_live_cycle()
 
     while True:
         schedule.run_pending()
-
-        # Admin Forced Scan
-        if STATE["force_scan"]:
-            await run_cycle()
-            STATE["force_scan"] = False
-
         await asyncio.sleep(1)
-
-async def main():
-    await asyncio.gather(
-        start_polling(),
-        background_scheduler()
-    )
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        log.info("Sistem durduruldu.")
+        asyncio.run(main_loop())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot durduruldu.")

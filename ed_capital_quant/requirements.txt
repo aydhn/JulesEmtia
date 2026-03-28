@@ -1,1 +1,11 @@
-yfinance==0.2.36\npandas==2.1.4\nnumpy==1.26.3\npandas-ta==0.3.14b0\nscikit-learn==1.3.2\nnltk==3.8.1\npython-telegram-bot==20.7\nfeedparser==6.0.10\nschedule==1.2.1
+yfinance
+pandas
+pandas_ta
+python-telegram-bot
+scikit-learn
+nltk
+feedparser
+schedule
+matplotlib
+numpy
+scipy

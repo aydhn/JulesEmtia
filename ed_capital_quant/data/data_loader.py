@@ -1,57 +1,36 @@
 import yfinance as yf
 import pandas as pd
 import time
-import gc
-from utils.logger import log
+from core.logger import logger
 
-def fetch_data_with_retry(ticker: str, interval: str, period: str = "60d") -> pd.DataFrame:
-    for attempt in range(3):
-        try:
-            df = yf.download(ticker, interval=interval, period=period, progress=False)
-            if df.empty:
-                raise ValueError("Boş Veri")
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = [c[0] for c in df.columns]
-            df.ffill(inplace=True)
-            return df
-        except Exception as e:
-            log.warning(f"{ticker} veri çekilemedi (Deneme {attempt+1}): {e}")
-            time.sleep(2 ** attempt)
-    return pd.DataFrame()
-
-def get_mtf_data(ticker: str) -> pd.DataFrame:
-    df_ltf = fetch_data_with_retry(ticker, "1h", period="60d")
-    df_htf = fetch_data_with_retry(ticker, "1d", period="100d")
-
-    if df_ltf.empty or df_htf.empty:
+class DataLoader:
+    @staticmethod
+    def fetch_data(ticker: str, timeframe: str = "1h", period: str = "1y", retries=3) -> pd.DataFrame:
+        for attempt in range(retries):
+            try:
+                df = yf.download(ticker, period=period, interval=timeframe, progress=False)
+                if df.empty:
+                    raise ValueError(f"{ticker} için boş veri döndü.")
+                df.ffill(inplace=True)
+                return df
+            except Exception as e:
+                sleep_time = 2 ** attempt
+                logger.warning(f"{ticker} veri çekilemedi. {sleep_time} sn bekleniyor... Hata: {e}")
+                time.sleep(sleep_time)
+        logger.error(f"{ticker} için veri çekimi {retries} denemede başarısız.")
         return pd.DataFrame()
 
-    # Shift 1d data to perfectly prevent lookahead bias
-    df_htf_shifted = df_htf.shift(1).add_suffix('_HTF')
+    @staticmethod
+    def get_mtf_data(ticker: str):
+        df_1h = DataLoader.fetch_data(ticker, "1h", "1y")
+        df_1d = DataLoader.fetch_data(ticker, "1d", "2y")
+        if df_1h.empty or df_1d.empty: return None
 
-    df_ltf = df_ltf.reset_index()
-    df_htf_shifted = df_htf_shifted.reset_index()
+        df_1d_shifted = df_1d.shift(1).copy()
+        df_1d_shifted.columns = [f"D1_{c[0]}" if isinstance(c, tuple) else f"D1_{c}" for c in df_1d_shifted.columns]
 
-    if 'Datetime' in df_ltf.columns and 'Date' in df_htf_shifted.columns:
-        # Normalize datetime timezone
-        df_ltf['Datetime'] = pd.to_datetime(df_ltf['Datetime']).dt.tz_localize(None)
-        df_htf_shifted['Date'] = pd.to_datetime(df_htf_shifted['Date']).dt.tz_localize(None)
+        df_1h.index = df_1h.index.tz_localize(None)
+        df_1d_shifted.index = df_1d_shifted.index.tz_localize(None)
 
-        df_merged = pd.merge_asof(
-            df_ltf.sort_values('Datetime'),
-            df_htf_shifted.sort_values('Date'),
-            left_on='Datetime',
-            right_on='Date',
-            direction='backward'
-        )
-
-        # Free memory
-        del df_htf
-        del df_ltf
-        del df_htf_shifted
-        gc.collect()
-
-        df_merged.set_index('Datetime', inplace=True)
-        return df_merged
-
-    return pd.DataFrame()
+        merged = pd.merge_asof(df_1h, df_1d_shifted, left_index=True, right_index=True, direction='backward')
+        return merged

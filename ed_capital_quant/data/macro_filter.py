@@ -1,56 +1,81 @@
-import yfinance as yf
 import pandas as pd
-from utils.logger import log
+from data.data_loader import DataLoader
+from scipy.stats import zscore
+from core.logger import logger
+import numpy as np
 
-def get_vix_data() -> pd.DataFrame:
-    df = yf.download("^VIX", period="5d", progress=False)
-    if df.empty or len(df) < 2: return pd.DataFrame()
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] for c in df.columns]
-    return df
+class MacroRegime:
+    @staticmethod
+    def check_black_swan() -> bool:
+        vix_df = DataLoader.fetch_data("^VIX", "1d", "1mo")
+        if vix_df.empty: return False
 
-def check_vix_circuit_breaker() -> bool:
-    try:
-        vix = get_vix_data()
-        if vix.empty: return False
+        try:
+            # Handle MultiIndex if present
+            close_prices = vix_df['Close']
+            if isinstance(vix_df.columns, pd.MultiIndex):
+                close_prices = vix_df['Close'].iloc[:, 0]
 
-        latest_vix = vix['Close'].iloc[-1].item() if hasattr(vix['Close'].iloc[-1], 'item') else float(vix['Close'].iloc[-1])
-        prev_vix = vix['Close'].iloc[-2].item() if hasattr(vix['Close'].iloc[-2], 'item') else float(vix['Close'].iloc[-2])
+            last_vix = close_prices.iloc[-1].item()
+            prev_vix = close_prices.iloc[-2].item()
+            vix_jump = (last_vix - prev_vix) / prev_vix
 
-        if latest_vix > 30.0 or (latest_vix - prev_vix) / prev_vix > 0.20:
-            log.critical(f"🚨 VIX DEVRE KESİCİ AKTİF! VIX: {latest_vix:.2f} (Önceki: {prev_vix:.2f})")
-            return True
+            if last_vix > 35 or vix_jump > 0.20:
+                logger.critical(f"🚨 SİYAH KUĞU TESPİTİ! VIX: {last_vix:.2f}. Devre Kesiciler Aktif.")
+                return True
+        except Exception as e:
+            logger.error(f"Black swan check error: {e}")
 
-    except Exception as e:
-        log.error(f"VIX kontrol hatası: {e}")
-    return False
+        return False
 
-def get_macro_data(ticker: str) -> pd.DataFrame:
-    df = yf.download(ticker, period="60d", progress=False)
-    if df.empty: return pd.DataFrame()
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] for c in df.columns]
-    return df['Close']
+    @staticmethod
+    def is_flash_crash(df: pd.DataFrame) -> bool:
+        if len(df) < 50: return False
+        try:
+            # Flatten multi-index if necessary
+            close_prices = df['Close'] if not isinstance(df.columns, pd.MultiIndex) else df['Close'].iloc[:, 0]
+            z_scores = zscore(close_prices.dropna())
+            last_z = z_scores.iloc[-1]
+            if abs(last_z) > 4.5:
+                logger.warning(f"Flaş Çöküş Anomalisi! Z-Score: {last_z:.2f}")
+                return True
+        except Exception as e:
+            logger.error(f"Flash crash detection error: {e}")
+        return False
 
-def get_macro_regime() -> str:
-    try:
-        dxy = get_macro_data("DX-Y.NYB")
-        tnx = get_macro_data("^TNX")
+    @staticmethod
+    def veto_signal(signal: str, ticker: str) -> bool:
+        """
+        DXY and US 10Y Yields check for market regime
+        Returns True to veto (reject) the signal, False to allow it.
+        """
+        try:
+            dxy_df = DataLoader.fetch_data("DX-Y.NYB", "1d", "6mo")
+            tnx_df = DataLoader.fetch_data("^TNX", "1d", "6mo")
 
-        if dxy.empty or tnx.empty or len(dxy) < 50 or len(tnx) < 50:
-            return "RISK_ON"
+            if dxy_df.empty or tnx_df.empty:
+                return False
 
-        latest_dxy = dxy.iloc[-1].item() if hasattr(dxy.iloc[-1], 'item') else float(dxy.iloc[-1])
-        ma_50_dxy = dxy.rolling(50).mean().iloc[-1].item() if hasattr(dxy.rolling(50).mean().iloc[-1], 'item') else float(dxy.rolling(50).mean().iloc[-1])
+            dxy_close = dxy_df['Close'] if not isinstance(dxy_df.columns, pd.MultiIndex) else dxy_df['Close'].iloc[:, 0]
+            tnx_close = tnx_df['Close'] if not isinstance(tnx_df.columns, pd.MultiIndex) else tnx_df['Close'].iloc[:, 0]
 
-        latest_tnx = tnx.iloc[-1].item() if hasattr(tnx.iloc[-1], 'item') else float(tnx.iloc[-1])
-        ma_50_tnx = tnx.rolling(50).mean().iloc[-1].item() if hasattr(tnx.rolling(50).mean().iloc[-1], 'item') else float(tnx.rolling(50).mean().iloc[-1])
+            # Calculate 50 SMA for DXY and TNX to determine trend
+            dxy_sma_50 = dxy_close.rolling(window=50).mean().iloc[-1]
+            tnx_sma_50 = tnx_close.rolling(window=50).mean().iloc[-1]
 
-        if latest_dxy > ma_50_dxy and latest_tnx > ma_50_tnx:
-            log.info(f"Makro Rejim: RISK_OFF (DXY: {latest_dxy:.2f} > {ma_50_dxy:.2f}, TNX: {latest_tnx:.2f} > {ma_50_tnx:.2f})")
-            return "RISK_OFF"
+            dxy_last = dxy_close.iloc[-1]
+            tnx_last = tnx_close.iloc[-1]
 
-    except Exception as e:
-        log.error(f"Macro regime kontrol hatası: {e}")
+            risk_off = (dxy_last > dxy_sma_50) and (tnx_last > tnx_sma_50)
 
-    return "RISK_ON"
+            # Risk-Off Regime (Tightening, Strong Dollar)
+            if risk_off:
+                # Reject Longs on Metals and Emerging Markets (TRY pairs)
+                if signal == "Long" and (ticker in ["GC=F", "SI=F", "HG=F", "PA=F", "PL=F"] or "TRY" in ticker):
+                    logger.info(f"Makro Veto: Risk-Off Rejimi. {ticker} Long sinyali reddedildi.")
+                    return True
+
+        except Exception as e:
+            logger.error(f"Makro filtre hatası: {e}")
+
+        return False

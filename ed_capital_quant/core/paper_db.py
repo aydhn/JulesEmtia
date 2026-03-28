@@ -1,57 +1,42 @@
 import sqlite3
 import pandas as pd
-from core.config import DB_NAME
+from core.logger import logger
 
 class PaperDB:
-    def __init__(self, db_name=DB_NAME):
+    def __init__(self, db_name="paper_db.sqlite3"):
         self.conn = sqlite3.connect(db_name, check_same_thread=False)
-        self.create_table()
+        self._init_db()
 
-    def create_table(self):
-        query = """
-        CREATE TABLE IF NOT EXISTS trades (
-            trade_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker TEXT,
-            direction INTEGER,
-            entry_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            entry_price REAL,
-            sl_price REAL,
-            tp_price REAL,
-            position_size REAL,
-            status TEXT DEFAULT 'OPEN',
-            exit_time TIMESTAMP,
-            exit_price REAL,
-            pnl REAL
-        )
-        """
-        self.conn.execute(query)
+    def _init_db(self):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS trades (
+                trade_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT, direction TEXT, entry_time TEXT, entry_price REAL,
+                sl_price REAL, tp_price REAL, position_size REAL,
+                status TEXT, exit_time TEXT, exit_price REAL, pnl REAL
+            )
+        ''')
         self.conn.commit()
 
-    def open_trade(self, ticker: str, direction: int, entry_price: float, sl: float, tp: float, size: float):
-        query = "INSERT INTO trades (ticker, direction, entry_price, sl_price, tp_price, position_size) VALUES (?, ?, ?, ?, ?, ?)"
-        self.conn.execute(query, (ticker, direction, entry_price, sl, tp, size))
-        self.conn.commit()
+    def open_trade(self, data: dict):
+        df = pd.DataFrame([data])
+        df.to_sql('trades', self.conn, if_exists='append', index=False)
+        logger.info(f"DB: Yeni işlem açıldı -> {data['ticker']} {data['direction']}")
 
     def get_open_trades(self):
-        query = "SELECT * FROM trades WHERE status = 'OPEN'"
-        return pd.read_sql(query, self.conn)
-
-    def get_closed_trades(self):
-        query = "SELECT * FROM trades WHERE status = 'CLOSED'"
-        return pd.read_sql(query, self.conn)
-
-    def get_all_trades(self):
-        query = "SELECT * FROM trades"
-        return pd.read_sql(query, self.conn)
+        return pd.read_sql("SELECT * FROM trades WHERE status='Open'", self.conn)
 
     def update_sl(self, trade_id: int, new_sl: float):
-        query = "UPDATE trades SET sl_price = ? WHERE trade_id = ?"
-        self.conn.execute(query, (new_sl, trade_id))
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE trades SET sl_price=? WHERE trade_id=?", (new_sl, trade_id))
         self.conn.commit()
 
-    def close_trade(self, trade_id: int, exit_price: float, pnl: float):
-        query = "UPDATE trades SET status = 'CLOSED', exit_time = CURRENT_TIMESTAMP, exit_price = ?, pnl = ? WHERE trade_id = ?"
-        self.conn.execute(query, (exit_price, pnl, trade_id))
+    def close_trade(self, trade_id: int, exit_price: float, exit_time: str, pnl: float):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            UPDATE trades SET status='Closed', exit_price=?, exit_time=?, pnl=?
+            WHERE trade_id=?
+        ''', (exit_price, exit_time, pnl, trade_id))
         self.conn.commit()
-
-db = PaperDB()
+        logger.info(f"DB: İşlem Kapatıldı ID:{trade_id} PNL:{pnl:.2f}")
