@@ -31,6 +31,59 @@ notifier = TelegramNotifier()
 IS_PAUSED = False
 corr_matrix = pd.DataFrame()
 
+def cmd_durum():
+    bal = broker.get_account_balance()
+    trades = broker.get_open_trades()
+    msg = f"📊 <b>DURUM RAPORU</b>\n💰 Kasa: {bal:.2f} USD\n📈 Açık Pozisyon: {len(trades)}\n"
+    for t in trades:
+        msg += f"- {t[2]} {t[1]} @ {t[4]:.2f} (SL: {t[5]:.2f})\n"
+    msg += f"⚙️ Duraklatıldı: {'Evet' if IS_PAUSED else 'Hayır'}"
+    notifier.send_message(msg)
+
+def cmd_durdur():
+    global IS_PAUSED
+    IS_PAUSED = True
+    notifier.send_message("⏸️ <b>SİSTEM DURDURULDU</b>\nYeni sinyal aranmayacak, ancak AÇIK pozisyonların TP/SL takibi devam ediyor.")
+
+def cmd_devam():
+    global IS_PAUSED
+    IS_PAUSED = False
+    notifier.send_message("▶️ <b>SİSTEM DEVAM EDİYOR</b>\nTam otonom tarama aktif.")
+
+def cmd_tara():
+    notifier.send_message("🔍 <b>MANUEL TARAMA BAŞLATILDI</b>")
+    run_live_cycle()
+
+def cmd_kapat_hepsi():
+    trades = broker.get_open_trades()
+    if not trades:
+        notifier.send_message("Kapatılacak açık pozisyon yok.")
+        return
+
+    notifier.send_message("🚨 <b>PANİK KAPATMASI BAŞLADI</b>")
+    for t in trades:
+        trade_id, ticker, direction, en_time, en_price, sl_price, tp_price, qty, status, ex_time, ex_price, pnl, cost = t
+        # In a real system, you fetch market price here. For Paper, we fetch it immediately.
+        try:
+            import yfinance as yf
+            current_price = float(yf.download(ticker, period="1d", interval="1m", progress=False)['Close'].iloc[-1])
+            exit_p = apply_execution_costs(direction, current_price, cost)
+            calc_pnl = (exit_p - en_price) * qty if direction == "Long" else (en_price - exit_p) * qty
+            broker.close_position(trade_id, exit_p, str(datetime.now(timezone.utc)), calc_pnl)
+            notifier.send_message(f"🔒 PANİK KAPATMA: {direction} {ticker} @ {exit_p:.2f} | PnL: {calc_pnl:.2f}")
+        except Exception as e:
+            log.error(f"Error panic closing {ticker}: {e}")
+
+    notifier.send_message("✅ <b>Tüm pozisyonlar kapatıldı.</b>")
+
+def setup_telegram_commands():
+    notifier.register_command("/durum", cmd_durum)
+    notifier.register_command("/durdur", cmd_durdur)
+    notifier.register_command("/devam", cmd_devam)
+    notifier.register_command("/tara", cmd_tara)
+    notifier.register_command("/kapat_hepsi", cmd_kapat_hepsi)
+    notifier.start_polling()
+
 def recover_state():
     """Reads SQLite to rebuild open positions on reboot (Phase 8)."""
     open_trades = get_open_positions()
@@ -87,13 +140,15 @@ def manage_open_positions(latest_prices: dict, atrs: dict):
         if new_sl != sl_price:
             broker.modify_trailing_stop(trade_id, new_sl)
             log.info(f"Trailing SL moved for {ticker} to {new_sl:.4f}")
+            if new_sl == en_price:
+                notifier.send_message(f"🔒 Risk Sıfırlandı: {ticker} SL seviyesi giriş fiyatına çekildi.")
 
 def run_live_cycle():
     """Main Orchestrator Pipeline (Phase 23)."""
     global IS_PAUSED, corr_matrix
-    if IS_PAUSED:
-        log.info("System is PAUSED. Skipping scan.")
-        return
+
+    # Still want to update prices and manage stops even if paused
+    open_trades = broker.get_open_trades()
 
     log.info("--- Starting MTF Live Cycle ---")
 
@@ -102,11 +157,8 @@ def run_live_cycle():
         log.warning("Scan aborted due to VIX Circuit Breaker.")
         return
 
-    open_trades = broker.get_open_trades()
-
     # 1. Check Global Limits (Phase 11)
-    if check_global_limits(open_trades, broker.get_account_balance()):
-        return
+    limit_reached = check_global_limits(open_trades, broker.get_account_balance())
 
     latest_prices = {}
     atrs = {}
@@ -126,6 +178,9 @@ def run_live_cycle():
                 latest = merged.iloc[-1]
                 latest_prices[ticker] = latest['Close']
                 atrs[ticker] = latest['ATR_14']
+
+                if IS_PAUSED or limit_reached:
+                    continue # Skip signal generation if paused or limits reached
 
                 # Z-Score Anomaly (Phase 19)
                 if check_zscore_flash_crash(merged): continue
@@ -205,8 +260,9 @@ if __name__ == "__main__":
     init_db()
     recover_state()
     update_correlation_matrix()
+    setup_telegram_commands()
 
-    notifier.send_message("🚀 ED Capital Quant Engine Live Paper Trade Mode Initialized.\nVIX Circuit Breakers: Armed.\nML Validator: Active.")
+    notifier.send_message("🚀 ED Capital Quant Engine Live Paper Trade Mode Initialized.\nVIX Circuit Breakers: Armed.\nML Validator: Active.\n\nKullanılabilir komutlar:\n/durum\n/durdur\n/devam\n/tara\n/kapat_hepsi")
 
     # Strict candle-close sync (top of the hour)
     schedule.every().hour.at(":00").do(run_live_cycle)
@@ -225,6 +281,7 @@ if __name__ == "__main__":
             time.sleep(1)
         except KeyboardInterrupt:
             log.info("Engine stopped by user.")
+            notifier.stop_polling()
             sys.exit(0)
         except Exception as e:
             log.error(f"Critical Main Loop Error: {e}")

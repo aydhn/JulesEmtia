@@ -1,8 +1,9 @@
-version: "3.8"
+version: '3.8'
+
 services:
   quant_engine:
     build: .
-    container_name: ed_capital_quant
+    container_name: ed_quant_bot
     restart: always
     environment:
       - TZ=Europe/Istanbul
@@ -13,8 +14,3 @@ services:
       - ./logs:/app/logs
       - ./models:/app/models
       - ./reports:/app/reports
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"

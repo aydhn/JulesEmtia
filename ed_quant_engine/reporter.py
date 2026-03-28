@@ -32,12 +32,12 @@ HTML_TEMPLATE = """
     </style>
 </head>
 <body>
-    <h1>Piyasalara Genel Bakış (Yönetici Özeti)</h1>
+    <h1>Piyasalara Genel Bakış</h1>
     <p>Rapor Tarihi: {{ date }}</p>
 
     <div>
         <div class="metric-box">
-            <div>Toplam Net PnL</div>
+            <div>Toplam Net PnL (Net of Fees)</div>
             <div class="metric-value">{{ total_pnl }} USD</div>
         </div>
         <div class="metric-box">
@@ -47,6 +47,21 @@ HTML_TEMPLATE = """
         <div class="metric-box">
             <div>Kâr Faktörü (Profit Factor)</div>
             <div class="metric-value">{{ profit_factor }}</div>
+        </div>
+    </div>
+
+    <div>
+        <div class="metric-box">
+            <div>İşlem Başına Ortalama Kâr (Avg Win)</div>
+            <div class="metric-value">{{ avg_win }} USD</div>
+        </div>
+        <div class="metric-box">
+            <div>İşlem Başına Ortalama Zarar (Avg Loss)</div>
+            <div class="metric-value">{{ avg_loss }} USD</div>
+        </div>
+        <div class="metric-box">
+            <div>Maksimum Düşüş (Max Drawdown)</div>
+            <div class="metric-value">{{ max_dd }}%</div>
         </div>
     </div>
 
@@ -87,8 +102,15 @@ def generate_tear_sheet(monte_carlo_results: dict = None):
     gross_loss = abs(losses['pnl'].sum())
     profit_factor = (gross_win / gross_loss) if gross_loss > 0 else float('inf')
 
+    avg_win = wins['pnl'].mean() if len(wins) > 0 else 0
+    avg_loss = abs(losses['pnl'].mean()) if len(losses) > 0 else 0
+
     # Plot Equity Curve
     df['cumulative_pnl'] = df['pnl'].cumsum()
+    running_max = df['cumulative_pnl'].cummax()
+    drawdown = (df['cumulative_pnl'] - running_max) / (running_max.replace(0, 1))
+    max_dd = abs(drawdown.min() * 100) if not drawdown.empty else 0
+
     plt.figure(figsize=(10, 5))
     plt.plot(df.index, df['cumulative_pnl'], color='#002855', linewidth=2)
     plt.title("ED Capital Kümülatif Getiri Eğrisi")
@@ -111,6 +133,9 @@ def generate_tear_sheet(monte_carlo_results: dict = None):
         total_pnl=f"{total_pnl:.2f}",
         win_rate=f"{win_rate:.1f}",
         profit_factor=f"{profit_factor:.2f}",
+        avg_win=f"{avg_win:.2f}",
+        avg_loss=f"{avg_loss:.2f}",
+        max_dd=f"{max_dd:.2f}",
         max_dd_99=f"{mc.get('max_dd_99', 0) * 100:.1f}",
         risk_of_ruin=f"{mc.get('risk_of_ruin', 0) * 100:.2f}"
     )
@@ -119,5 +144,13 @@ def generate_tear_sheet(monte_carlo_results: dict = None):
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_out)
 
-    log.info(f"Tear sheet generated at {html_path}")
-    return html_path
+    try:
+        pdf_path = f"{REPORTS_DIR}/latest_report.pdf"
+        pdfkit.from_file(html_path, pdf_path, options={"enable-local-file-access": ""})
+        log.info(f"PDF Tear sheet generated at {pdf_path}")
+        return pdf_path
+    except Exception as e:
+        log.error(f"Failed to generate PDF (wkhtmltopdf missing?), falling back to HTML: {e}")
+        log.info(f"Tear sheet HTML generated at {html_path}")
+        return html_path
+

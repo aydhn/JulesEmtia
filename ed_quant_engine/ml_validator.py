@@ -29,7 +29,6 @@ def create_labels(df: pd.DataFrame, n_forward: int = 10, tp_mult: float = 3.0, s
             high_reached = future_window.max() >= tp_long
             low_reached = future_window.min() <= sl_long
 
-            # Simple assumption: if it hit TP before SL, it's a win.
             if high_reached and not low_reached:
                 labels[i] = 1
 
@@ -43,6 +42,12 @@ def train_model(historical_df: pd.DataFrame, features: list):
 
     df = historical_df.copy()
     y = create_labels(df)
+
+    missing_features = [f for f in features if f not in df.columns]
+    if missing_features:
+        log.error(f"Cannot train model. Missing features: {missing_features}")
+        return False
+
     X = df[features]
 
     # Drop NaNs
@@ -54,6 +59,10 @@ def train_model(historical_df: pd.DataFrame, features: list):
     X = X.iloc[:-10]
     y = y.iloc[:-10]
 
+    if len(X) < 100:
+        log.warning("Not enough valid rows after dropping NaNs to train ML model.")
+        return False
+
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False) # Time-series split
 
     model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=-1)
@@ -63,7 +72,7 @@ def train_model(historical_df: pd.DataFrame, features: list):
     log.info(f"ML Model Trained. OOS Accuracy: {score:.2%}")
 
     os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
-    joblib.dump(model, MODEL_PATH)
+    joblib.dump({"model": model, "features": features}, MODEL_PATH)
     return True
 
 def predict_proba_veto(features_dict: dict, threshold: float = 0.60) -> bool:
@@ -74,12 +83,28 @@ def predict_proba_veto(features_dict: dict, threshold: float = 0.60) -> bool:
         if not os.path.exists(MODEL_PATH):
             return False # No model yet, don't veto
 
-        model = joblib.load(MODEL_PATH)
+        saved_data = joblib.load(MODEL_PATH)
+        model = saved_data["model"]
+        features = saved_data["features"]
 
-        # Ensure features_dict matches the training features exactly
-        X_new = pd.DataFrame([features_dict])
+        # Build X_new precisely matching the features list
+        x_list = []
+        for f in features:
+            val = features_dict.get(f)
+            if val is None or pd.isna(val):
+                return False # Missing feature, fail open (allow trade)
+            x_list.append(val)
 
-        proba = model.predict_proba(X_new)[0][1] # Probability of class 1 (Success)
+        X_new = pd.DataFrame([x_list], columns=features)
+
+        # Some models might not have class 1 if training data was pure failures
+        if len(model.classes_) == 1:
+            if model.classes_[0] == 0:
+                proba = 0.0
+            else:
+                proba = 1.0
+        else:
+            proba = model.predict_proba(X_new)[0][1] # Probability of class 1 (Success)
 
         if proba < threshold:
             log.warning(f"ML VETO: Probability {proba:.2%} < {threshold:.2%}. Rejecting signal.")
