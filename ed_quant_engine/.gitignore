@@ -1,12 +1,18 @@
+# Security
 .env
+
+# Cache
 __pycache__/
 *.pyc
-*.sqlite3
-*.db
+
+# Local Databases and ML models
+data/*.sqlite3
+data/*.pkl
+
+# Logs and Reports
 logs/
-reports/
-*.pdf
-*.html
-*.pkl
+data/reports/
+
+# IDE files
 .vscode/
-venv/
+.idea/
