@@ -1,0 +1,13 @@
+yfinance==0.2.37
+pandas_datareader==0.10.0
+feedparser==6.0.10
+pandas==2.2.1
+numpy==1.26.4
+pandas_ta==0.4.71b0
+scikit-learn==1.4.1.post1
+nltk==3.8.1
+schedule==1.2.1
+python-telegram-bot==21.0.1
+python-dotenv==1.2.0
+requests==2.31.0
+APScheduler==3.10.4

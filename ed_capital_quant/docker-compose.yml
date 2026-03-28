@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  quant_engine:
+    build: .
+    container_name: ed_capital_quant_bot
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - TZ=Europe/Istanbul  # Zaman dilimi senkronizasyonu çok kritiktir
+    volumes:
+      - ./paper_db.sqlite3:/app/paper_db.sqlite3  # Kalıcı Veritabanı
+      - ./logs:/app/logs                          # Kalıcı Loglar
+      - ./models:/app/models                      # Kalıcı Makine Öğrenmesi Modelleri
