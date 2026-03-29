@@ -1,25 +1,15 @@
-# ED Capital Quant Engine
+# ED Capital Quant Engine 🚀
 
-A high-performance, modular, and low-frequency algorithmic trading engine focusing on win-rate optimization.
-Built entirely with free, open-source libraries and APIs. Benchmark: TÜFE, US CPI, and USD/TRY.
+Bu proje, düşük frekanslı (Low Frequency), yüksek isabet oranlı (High Win-Rate), sıfır bütçeli ve tamamen modüler bir Algoritmik İşlem / Paper Trading Motorudur.
 
-## Key Features
-1. **Multi-Timeframe Confluence (MTF)**: Daily trends (1D) guide Hourly execution (1H), eliminating lookahead bias.
-2. **Dynamic Risk Management (JP Morgan Framework)**: ATR-based Trailing Stops and Breakeven logic ensures strictly monotonic stops.
-3. **Kelly Criterion Position Sizing**: Fractional Kelly allocations prevent risk of ruin.
-4. **Machine Learning Validator**: Random Forest classifier filters out statistically improbable signals.
-5. **Macro & Sentiment Veto**: Integrates VIX circuit breakers, Flash Crash Z-Score protection, and NLP-based sentiment filtering.
-6. **Execution Simulation**: Applies asset-specific spread and dynamic volatility slippage to backtests and paper trades.
-7. **Broker Abstraction Layer**: Solid `BaseBroker` implementation for seamless transition from SQLite `PaperBroker` to live environments with SPL Level 3 Audit Trails.
-8. **DevOps**: Docker containerized, Systemd-ready, with SQLite/Log persistence and Two-Way Telegram command overrides.
+## Mimari Özellikler
+- **Anti-Lookahead Bias:** Zaman dilimi (MTF) birleştirmelerinde sızıntı sıfıra indirilmiştir.
+- **Risk Yönetimi:** Fractional Kelly Kriteri, Dinamik ATR İzleyen Stop ve VIX Siyah Kuğu Devre Kesici.
+- **Yapay Zeka:** Random Forest Sinyal Doğrulama ve NLTK VADER Duyarlılık (Sentiment) Analizi.
+- **Maliyet Simülasyonu:** Slippage ve Spread hesaplamaları net getiri üzerinden yapılır.
+- **Raporlama:** Monte Carlo Stres Testi ve Kurumsal HTML Tear Sheet.
 
-## Deployment
-
-1. Clone repository and create `.env` using `.env.example`.
-2. Configure your Telegram BOT_TOKEN and ADMIN_CHAT_ID.
-3. Use the management script to build and run the daemon in the background:
-```bash
-./manage_bot.sh start
-```
-
-Use `/durum` or `/tara` via your Telegram Bot.
+## Kurulum
+1. `.env.example` dosyasını `.env` olarak kopyalayın ve Telegram Token bilgilerinizi girin.
+2. `docker-compose up -d --build` komutuyla sistemi ayağa kaldırın.
+3. Telegram üzerinden `/durum`, `/tara` komutlarıyla sistemi test edin.
