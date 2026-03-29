@@ -1,12 +1,15 @@
 [Unit]
-Description=ED Capital Quant Engine Service
-After=network.target
+Description=ED Capital Quant Engine Daemon
+After=network.target docker.service
+Requires=docker.service
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/ed_quant_engine
-ExecStart=/opt/ed_quant_engine/manage_bot.sh start
+# Change WorkingDirectory to the actual path of your project
+WorkingDirectory=/root/ed_quant_engine
+ExecStart=/usr/local/bin/docker-compose up --build
+ExecStop=/usr/local/bin/docker-compose down
 Restart=always
 RestartSec=10
 StandardOutput=journal

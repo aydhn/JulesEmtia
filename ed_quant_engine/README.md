@@ -1,46 +1,25 @@
-# ED Capital Quant Engine 🚀
+# ED Capital Quant Engine
 
-A modular, zero-budget, high-win-rate, low-frequency algorithmic paper trading bot engineered for professional quantitative standards.
+A high-performance, modular, and low-frequency algorithmic trading engine focusing on win-rate optimization.
+Built entirely with free, open-source libraries and APIs. Benchmark: TÜFE, US CPI, and USD/TRY.
 
-## 📌 Features (Phases 1-25)
-* **Zero Budget Ecosystem:** Uses only free APIs (`yfinance`, `pandas_ta`, `NLTK RSS feeds`). No scraping.
-* **MTF Confluence:** Validates signals across Hourly and Daily timeframes without lookahead bias.
-* **Risk Management:**
-  * Dynamic ATR Trailing Stops & Breakeven logic.
-  * Fractional Kelly Criterion position sizing.
-  * Correlation Veto to prevent duplicate portfolio risk.
-* **Circuit Breakers (Black Swan):** Halts trading automatically when VIX > 30 or flash crash Z-Scores are detected.
-* **Machine Learning Validation:** Uses `RandomForestClassifier` to veto low-probability setups based on historical data.
-* **NLP News Sentiment:** Filters trades against the prevailing macro news sentiment using `NLTK VADER`.
-* **Broker Abstraction Layer (SOLID):** Pluggable architecture ready for live broker execution (currently connected to `PaperBroker` over SQLite).
-* **Two-Way Telegram UI:** Execute `/durum`, `/durdur`, `/kapat_hepsi` panic buttons right from your phone.
-* **Kurumsal Raporlama:** Automatically generates "Piyasalara Genel Bakış" PDF/HTML Tear Sheets.
-* **Dockerized Daemon:** Runs 24/7 on Ubuntu/WSL via `docker-compose` with full state-recovery logic.
+## Key Features
+1. **Multi-Timeframe Confluence (MTF)**: Daily trends (1D) guide Hourly execution (1H), eliminating lookahead bias.
+2. **Dynamic Risk Management (JP Morgan Framework)**: ATR-based Trailing Stops and Breakeven logic ensures strictly monotonic stops.
+3. **Kelly Criterion Position Sizing**: Fractional Kelly allocations prevent risk of ruin.
+4. **Machine Learning Validator**: Random Forest classifier filters out statistically improbable signals.
+5. **Macro & Sentiment Veto**: Integrates VIX circuit breakers, Flash Crash Z-Score protection, and NLP-based sentiment filtering.
+6. **Execution Simulation**: Applies asset-specific spread and dynamic volatility slippage to backtests and paper trades.
+7. **Broker Abstraction Layer**: Solid `BaseBroker` implementation for seamless transition from SQLite `PaperBroker` to live environments with SPL Level 3 Audit Trails.
+8. **DevOps**: Docker containerized, Systemd-ready, with SQLite/Log persistence and Two-Way Telegram command overrides.
 
-## 🛠️ Setup & Deployment
+## Deployment
 
-1. **Clone & Configure:**
+1. Clone repository and create `.env` using `.env.example`.
+2. Configure your Telegram BOT_TOKEN and ADMIN_CHAT_ID.
+3. Use the management script to build and run the daemon in the background:
 ```bash
-git clone https://...
-cd ed_quant_engine
+./manage_bot.sh start
 ```
 
-2. **Create the `.env` file:**
-Create a `.env` file in the root directory and add your credentials:
-```env
-TELEGRAM_BOT_TOKEN="your_telegram_bot_token"
-ADMIN_CHAT_ID="your_telegram_chat_id"
-```
-
-3. **Deploy the Engine:**
-Run the deployment script to build the Docker image and start the background daemon:
-```bash
-./deploy.sh
-```
-
-4. **Monitor:**
-Check the live logs:
-```bash
-docker logs -f ed_quant_engine
-```
-Or simply wait for Telegram notifications!
+Use `/durum` or `/tara` via your Telegram Bot.

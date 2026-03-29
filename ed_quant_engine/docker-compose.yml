@@ -4,20 +4,20 @@ services:
   quant_engine:
     build: .
     container_name: ed_quant_engine
-    restart: always
-    environment:
-      - TZ=Europe/Istanbul # Sync Timezone
+    restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - TZ=Europe/Istanbul # Timezone synchronization
+      - PYTHONUNBUFFERED=1
     volumes:
-      # Persistent Storage Volumes
-      - ./paper_db.sqlite3:/app/paper_db.sqlite3
-      - ./logs:/app/logs
-      - ./models:/app/models
-      - ./reports:/app/reports
-    mem_limit: 1g
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      - ./data:/app/data        # SQLite persistence
+      - ./logs:/app/logs        # Log persistence
+      - ./models:/app/models    # ML Model persistence
+      - ./reports:/app/reports  # Tear Sheet persistence
+    deploy:
+      resources:
+        limits:
+          memory: 2G            # High-availability resource capping
+        reservations:
+          memory: 512M
