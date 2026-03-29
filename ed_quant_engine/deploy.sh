@@ -1,22 +1,21 @@
 #!/bin/bash
-# Phase 25: One-click Docker Deployment
+# High-Availability Deployment Script
 
 echo "🚀 Starting ED Capital Quant Engine Deployment..."
 
-# Ensure persistent directories exist locally
-mkdir -p logs models reports
+# Ensure .env exists
+if [ ! -f .env ]; then
+    echo "❌ ERROR: .env file is missing! Create it before deploying."
+    echo "Format: TELEGRAM_BOT_TOKEN=... ADMIN_CHAT_ID=..."
+else
+    # Set permissions for the volumes on host to match container user
+    mkdir -p logs models reports
+    touch paper_db.sqlite3
 
-echo "1. Shutting down old containers (if any)..."
-docker-compose down
+    # Build and start container (detached mode)
+    echo "🐳 Building Docker image..."
+    docker-compose up -d --build
 
-echo "2. Building new Docker image (Python Slim)..."
-docker-compose build --no-cache
-
-echo "3. Starting ED Quant Engine in detached mode..."
-docker-compose up -d
-
-echo "4. Checking container status..."
-docker ps | grep ed_quant_engine
-
-echo "✅ Deployment Complete! Bot is now running 7/24."
-echo "Use 'docker logs -f ed_quant_engine_prod' to monitor."
+    echo "✅ Deployment successful!"
+    echo "📄 To view live logs: docker logs -f ed_quant_engine"
+fi

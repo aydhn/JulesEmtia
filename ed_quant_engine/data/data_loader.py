@@ -1,44 +1,54 @@
 import yfinance as yf
 import pandas as pd
-import asyncio
+import numpy as np
 import time
-from typing import Dict
-from ed_quant_engine.utils.logger import setup_logger
+from typing import Dict, Optional, Tuple
+from ed_quant_engine.core.logger import logger
 
-logger = setup_logger("DataLoader")
+def fetch_data(ticker: str, period: str = "2y", interval: str = "1d", max_retries: int = 3) -> pd.DataFrame:
+    """
+    Fetches OHLCV data from yfinance with Exponential Backoff.
+    """
+    for attempt in range(max_retries):
+        try:
+            # Download data silently
+            df = yf.download(tickers=ticker, period=period, interval=interval, progress=False)
 
-class DataLoader:
-    def __init__(self, tickers: list):
-        self.tickers = tickers
+            if df.empty:
+                logger.warning(f"No data returned for {ticker} (Attempt {attempt+1}/{max_retries})")
+                time.sleep(2 ** attempt)
+                continue
 
-    async def fetch_historical_data_async(self, period="2y", htf="1d", ltf="1h") -> Dict[str, Dict[str, pd.DataFrame]]:
-        """Asynchronously fetches HTF and LTF data for the universe."""
-        data = {}
-        for ticker in self.tickers:
-            try:
-                htf_df = yf.download(ticker, period=period, interval=htf, progress=False, group_by="ticker")
-                await asyncio.sleep(0.5) # Rate limit protection
-                ltf_df = yf.download(ticker, period="730d", interval=ltf, progress=False, group_by="ticker")
-                await asyncio.sleep(0.5)
+            # Clean MultiIndex columns if present (yfinance specific issue)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
 
-                if not htf_df.empty and not ltf_df.empty:
-                    # Clean multi-index if exists
-                    if isinstance(htf_df.columns, pd.MultiIndex):
-                         htf_df.columns = htf_df.columns.droplevel(0)
-                    if isinstance(ltf_df.columns, pd.MultiIndex):
-                         ltf_df.columns = ltf_df.columns.droplevel(0)
+            # Drop timezone information to avoid tz-naive/tz-aware mixing issues later
+            if df.index.tz is not None:
+                df.index = df.index.tz_convert(None)
 
-                    # Handle NaNs and missing values professionally
-                    htf_df.ffill(inplace=True)
-                    ltf_df.ffill(inplace=True)
+            # Handle missing data professionally
+            df.ffill(inplace=True)
+            df.bfill(inplace=True)
 
-                    data[ticker] = {"HTF": htf_df, "LTF": ltf_df}
-                    logger.info(f"Successfully loaded {ticker} (HTF: {len(htf_df)}, LTF: {len(ltf_df)})")
-                else:
-                    logger.warning(f"Empty DataFrame for {ticker}")
+            return df
 
-            except Exception as e:
-                logger.error(f"Error fetching data for {ticker}: {e}")
-                # Exponential backoff placeholder logic could go here
+        except Exception as e:
+            logger.error(f"Error fetching {ticker}: {e} (Attempt {attempt+1}/{max_retries})")
+            time.sleep((2 ** attempt) * 2) # Exponential backoff 2, 4, 8 seconds
 
-        return data
+    logger.critical(f"Failed to fetch data for {ticker} after {max_retries} attempts.")
+    return pd.DataFrame()
+
+def fetch_multi_timeframe(ticker: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Fetches HTF (1d) and LTF (1h) data.
+    """
+    htf = fetch_data(ticker, period="5y", interval="1d")
+    # yfinance only allows 1h data for the last 730 days max
+    ltf = fetch_data(ticker, period="730d", interval="1h")
+    return htf, ltf
+
+if __name__ == "__main__":
+    df = fetch_data("GC=F", "1mo", "1d")
+    print(df.tail())
