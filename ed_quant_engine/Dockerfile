@@ -1,42 +1,32 @@
-# Phase 25: Dockerization (Python Slim)
+# Phase 25: Corporate Container Architecture
 FROM python:3.10-slim
 
-# Set environment variables
+# Prevent Python from writing pyc files and keep stdout unbuffered
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-ENV TZ=Europe/Istanbul
 
-# Create app directory and set as working directory
-WORKDIR /app
-
-# Install system dependencies required for compilation and pdf generation
+# Install system dependencies required for data processing
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    wkhtmltopdf \
-    tzdata \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install python dependencies
+# Set up non-root user for security
+RUN useradd -m -r -u 1000 quantuser
+WORKDIR /app
+
+# Copy requirements and install
 COPY requirements.txt .
-RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# NLTK Vader setup (run once during build)
-RUN python -m nltk.downloader vader_lexicon
-
-# Create non-root user and directories
-RUN useradd -m quantuser && \
-    mkdir -p /app/logs /app/models /app/reports && \
-    chown -R quantuser:quantuser /app
-
-# Copy the application code
+# Copy project files
 COPY . .
 
-# Ensure permissions
+# Set permissions for data, logs, and models
 RUN chown -R quantuser:quantuser /app
 
 # Switch to non-root user
 USER quantuser
 
-# Command to run the bot
+# Expose no ports as this is a background worker
+# CMD defaults to running the main loop
 CMD ["python", "main.py"]
