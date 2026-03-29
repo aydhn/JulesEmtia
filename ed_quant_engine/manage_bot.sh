@@ -1,20 +1,31 @@
 #!/bin/bash
-case "$1" in
+# Phase 9: Management Script for ED Capital Quant Engine
+
+ACTION=$1
+
+case "$ACTION" in
     start)
-        echo "🚀 ED Capital Quant Engine başlatılıyor..."
+        echo "Starting ED Capital Quant Engine via Docker..."
         docker-compose up -d --build
         ;;
     stop)
-        echo "⏸ Sistem durduruluyor..."
+        echo "Stopping ED Capital Quant Engine..."
         docker-compose down
         ;;
+    restart)
+        echo "Restarting ED Capital Quant Engine..."
+        docker-compose down
+        docker-compose up -d --build
+        ;;
     logs)
-        docker-compose logs -f --tail=100
+        echo "Tailing logs..."
+        docker logs -f ed_quant_engine
         ;;
     status)
-        docker ps | grep edcapital_quant
+        echo "Status:"
+        docker ps | grep ed_quant_engine
         ;;
     *)
-        echo "Kullanım: ./manage_bot.sh {start|stop|logs|status}"
+        echo "Usage: ./manage_bot.sh {start|stop|restart|logs|status}"
         ;;
 esac

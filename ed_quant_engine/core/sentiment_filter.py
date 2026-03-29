@@ -1,56 +1,71 @@
 import feedparser
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
+from typing import Dict, List, Any
 import nltk
-from ed_quant_engine.utils.logger import setup_logger
+from ed_quant_engine.core.logger import logger
+import threading
 
-logger = setup_logger("SentimentFilter")
-
-# Download VADER lexicon on first run silently
+# Download the VADER lexicon if it's not present (do this once per container/environment)
 try:
-    nltk.data.find('sentiment/vader_lexicon.zip')
-except LookupError:
     nltk.download('vader_lexicon', quiet=True)
+except Exception as e:
+    logger.error(f"Failed to download vader_lexicon: {e}")
 
 class SentimentFilter:
+    """
+    Zero-Budget NLP News Sentiment Analysis Engine using Yahoo Finance RSS and NLTK VADER.
+    """
     def __init__(self):
         self.sia = SentimentIntensityAnalyzer()
-        self.rss_urls = [
-            "https://feeds.finance.yahoo.com/rss/2.0/headline?s=GC=F,CL=F,DX-Y.NYB",
-            # Add more free RSS feeds here
-        ]
         self.cache = {}
+        self.rss_urls = [
+            "https://feeds.finance.yahoo.com/rss/2.0/headline?s=GC=F", # Gold
+            "https://feeds.finance.yahoo.com/rss/2.0/headline?s=CL=F", # Crude Oil
+            "https://feeds.finance.yahoo.com/rss/2.0/headline?s=EURUSD=X", # General FX
+            # Add more specific tickers as needed
+        ]
 
-    def fetch_news_sentiment(self) -> float:
-        """Fetches RSS news and calculates aggregate sentiment score (-1 to 1)."""
+    def update_sentiment_cache(self):
+        """
+        Runs asynchronously or in a thread. Fetches news and updates the cache.
+        """
+        logger.info("Starting background NLP sentiment update...")
         try:
-            compound_scores = []
             for url in self.rss_urls:
+                ticker = url.split("s=")[-1]
                 feed = feedparser.parse(url)
-                for entry in feed.entries[:10]: # Top 10 latest
-                    score = self.sia.polarity_scores(entry.title)['compound']
-                    compound_scores.append(score)
 
-            if not compound_scores:
-                 return 0.0
+                scores = []
+                for entry in feed.entries[:10]: # Top 10 headlines
+                    text = f"{entry.title}. {entry.description}"
+                    score = self.sia.polarity_scores(text)['compound']
+                    scores.append(score)
 
-            avg_score = sum(compound_scores) / len(compound_scores)
-            self.cache['macro_sentiment'] = avg_score
-            logger.info(f"Updated Macro Sentiment Score: {avg_score:.2f}")
-            return avg_score
-
+                if scores:
+                    avg_score = sum(scores) / len(scores)
+                    self.cache[ticker] = avg_score
+                    logger.debug(f"Sentiment cache updated for {ticker}: {avg_score:.2f}")
         except Exception as e:
-            logger.error(f"Failed to fetch RSS sentiment: {e}")
-            return 0.0
+            logger.error(f"Failed to update sentiment cache: {e}")
 
-    def veto_signal(self, direction: str, threshold=0.5) -> bool:
-        """Returns True if sentiment strongly contradicts the technical signal."""
-        score = self.cache.get('macro_sentiment', 0.0)
+    def get_sentiment(self, ticker: str) -> float:
+        """
+        Returns the cached compound score (-1.0 to 1.0).
+        If ticker not found, returns 0.0 (Neutral).
+        """
+        return self.cache.get(ticker, 0.0)
 
-        if direction == "Long" and score <= -threshold:
-             logger.warning(f"Sentiment Veto: Negative news ({score:.2f}) blocks Long.")
-             return True
-        elif direction == "Short" and score >= threshold:
-             logger.warning(f"Sentiment Veto: Positive news ({score:.2f}) blocks Short.")
-             return True
+    def start_background_task(self, interval_minutes: int = 60):
+        """
+        Uses Python threading to poll RSS feeds without blocking the main event loop.
+        """
+        def run():
+            import time
+            while True:
+                self.update_sentiment_cache()
+                time.sleep(interval_minutes * 60)
 
-        return False
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+
+sentiment_filter = SentimentFilter()

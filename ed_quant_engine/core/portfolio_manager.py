@@ -1,90 +1,104 @@
 import pandas as pd
 import numpy as np
-from typing import List, Dict
-from ed_quant_engine.utils.logger import setup_logger
-from ed_quant_engine.config import Config
-
-logger = setup_logger("PortfolioManager")
+from typing import List, Dict, Tuple
+from ed_quant_engine.core.logger import logger
 
 class PortfolioManager:
-    def __init__(self):
-        self.max_positions = Config.MAX_OPEN_POSITIONS
-        self.max_risk_pct = Config.MAX_PORTFOLIO_RISK_PCT
-        self.base_capital = Config.BASE_CAPITAL
-        self.correlation_matrix = pd.DataFrame()
+    """
+    Advanced Portfolio Allocation, Correlation Engine & Kelly Criterion.
+    Enforces risk exposure limits and prevents duplicate risks.
+    """
+    def __init__(self, max_positions: int = 4, max_risk_pct: float = 0.06, correlation_threshold: float = 0.75):
+        self.max_positions = max_positions
+        self.max_risk_pct = max_risk_pct
+        self.corr_threshold = correlation_threshold
 
-    def update_correlation_matrix(self, price_data: Dict[str, pd.DataFrame], window=30):
-        """Calculates 30-day rolling Pearson correlation matrix for the universe."""
-        try:
-            closes = {}
-            for ticker, dfs in price_data.items():
-                if not dfs['HTF'].empty:
-                     closes[ticker] = dfs['HTF']['Close'].tail(window)
+    def calculate_correlation_matrix(self, price_data: pd.DataFrame, window: int = 30) -> pd.DataFrame:
+        """
+        Dynamically calculates rolling Pearson correlation between all traded assets.
+        Input should be a DataFrame where columns are Tickers and values are daily closing prices.
+        """
+        returns = price_data.pct_change().dropna()
+        return returns.tail(window).corr()
 
-            if closes:
-                df_closes = pd.DataFrame(closes)
-                self.correlation_matrix = df_closes.corr(method='pearson')
-                logger.info("Correlation matrix updated.")
-        except Exception as e:
-            logger.error(f"Failed to update correlation matrix: {e}")
-
-    def correlation_veto(self, new_ticker: str, new_direction: str, open_positions: List[Dict], threshold=0.75) -> bool:
-        """Vetoes signal if highly correlated with an existing open position in same direction."""
-        if self.correlation_matrix.empty or new_ticker not in self.correlation_matrix.columns:
-             return False
+    def correlation_veto(self, new_ticker: str, new_direction: str, open_positions: List[Dict], corr_matrix: pd.DataFrame) -> bool:
+        """
+        Risk Duplication Filter. Rejects trades highly correlated with open trades in the same direction.
+        Returns True if signal is VETOED.
+        """
+        if corr_matrix.empty or new_ticker not in corr_matrix.columns:
+            return False # Assume uncorrelated
 
         for pos in open_positions:
-            existing_ticker = pos['ticker']
-            existing_dir = pos['direction']
+            open_ticker = pos['ticker']
+            open_dir = pos['direction']
 
-            if existing_ticker in self.correlation_matrix.columns:
-                corr = self.correlation_matrix.loc[new_ticker, existing_ticker]
+            if open_ticker in corr_matrix.columns:
+                corr = corr_matrix.loc[new_ticker, open_ticker]
 
-                # Risk Duplication Filter
-                if abs(corr) >= threshold and new_direction == existing_dir:
-                    logger.warning(f"Correlation Veto: {new_ticker} is highly correlated ({corr:.2f}) with open {existing_ticker}")
+                # Positive Correlation + Same Direction = Double Risk (VETO)
+                if corr > self.corr_threshold and open_dir == new_direction:
+                    logger.warning(f"Correlation Veto: {new_ticker} is highly correlated ({corr:.2f}) with open {open_ticker}")
                     return True
+
+                # Negative Correlation + Opposite Direction = Double Risk (VETO)
+                if corr < -self.corr_threshold and open_dir != new_direction:
+                    logger.warning(f"Correlation Veto: {new_ticker} is inversely correlated ({corr:.2f}) with open {open_ticker}")
+                    return True
+
         return False
 
-    def calculate_fractional_kelly(self, win_rate: float, avg_win: float, avg_loss: float) -> float:
-        """Calculates Half-Kelly optimal position sizing fraction."""
-        if avg_loss == 0 or win_rate == 0:
-            return 0.01 # Fallback minimal risk
+    def check_exposure_limits(self, open_positions: List[Dict], capital: float) -> bool:
+        """
+        Global Risk Limit Veto.
+        Returns True if exposure limits are exceeded (VETOED).
+        """
+        if len(open_positions) >= self.max_positions:
+            logger.warning(f"Exposure Limit Veto: Max open positions reached ({self.max_positions})")
+            return True
 
-        b = avg_win / abs(avg_loss)
-        p = win_rate
+        # Calculate total risk at stake
+        total_risk = sum(abs(pos['entry_price'] - pos['sl_price']) * pos['position_size'] for pos in open_positions)
+
+        if total_risk / capital >= self.max_risk_pct:
+            logger.warning(f"Exposure Limit Veto: Max portfolio risk exceeded ({total_risk/capital*100:.2f}% >= {self.max_risk_pct*100}%)")
+            return True
+
+        return False
+
+    def calculate_kelly_fraction(self, closed_trades: pd.DataFrame, max_cap: float = 0.04) -> float:
+        """
+        Fractional Kelly Criterion calculation based on actual historical performance.
+        Returns the % of capital to risk on the next trade (e.g., 0.02 for 2%).
+        """
+        if closed_trades.empty or len(closed_trades) < 5:
+            return 0.01 # Default to 1% if insufficient history
+
+        wins = closed_trades[closed_trades['pnl'] > 0]
+        losses = closed_trades[closed_trades['pnl'] < 0]
+
+        # Win Rate (p)
+        p = len(wins) / len(closed_trades)
         q = 1 - p
 
-        kelly_pct = (b * p - q) / b
+        # Average Win / Average Loss (b)
+        avg_win = wins['pnl'].mean() if not wins.empty else 0.0
+        avg_loss = abs(losses['pnl'].mean()) if not losses.empty else 0.0
 
-        if kelly_pct <= 0:
-             logger.warning(f"Kelly <= 0. Edge lost. Halting sizing.")
-             return 0.005 # Cap at 0.5% risk if edge is negative
+        if avg_loss == 0:
+            return max_cap
 
-        half_kelly = kelly_pct / 2.0
+        b = avg_win / avg_loss
 
-        # Hard Cap Protection (Phase 15)
-        return min(half_kelly, 0.04) # Max 4% absolute risk per trade
+        # Full Kelly (f*)
+        f = (b * p - q) / b
 
-    def get_position_size(self, signal: dict, current_capital: float, win_stats: dict) -> float:
-        """Returns recommended lot size / dollar risk amount."""
-        wr = win_stats.get('win_rate', 0.5)
-        aw = win_stats.get('avg_win', 2.0)
-        al = win_stats.get('avg_loss', 1.0)
+        # JP Morgan Risk Mitigation: Half Kelly
+        half_kelly = f / 2.0
 
-        risk_fraction = self.calculate_fractional_kelly(wr, aw, al)
-        risk_amount = current_capital * risk_fraction
+        # If negative Kelly (strategy is losing edge), drastically reduce risk
+        if half_kelly <= 0:
+            return 0.005 # Minimal risk
 
-        sl_distance = abs(signal['entry_price'] - signal['sl_price'])
-        if sl_distance == 0:
-            return 0.0
-
-        position_size = risk_amount / sl_distance
-        logger.info(f"Position Sizing: Risk Amount ${risk_amount:.2f} ({risk_fraction*100:.1f}%), Size: {position_size:.4f}")
-        return position_size
-
-    def global_limit_veto(self, open_positions_count: int) -> bool:
-        if open_positions_count >= self.max_positions:
-             logger.warning(f"Global Limit Veto: Max positions ({self.max_positions}) reached.")
-             return True
-        return False
+        # Hard Cap Protection
+        return min(half_kelly, max_cap)

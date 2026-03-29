@@ -1,13 +1,23 @@
 version: '3.8'
+
 services:
   quant_engine:
     build: .
-    container_name: edcapital_quant
+    container_name: ed_quant_engine
     restart: always
     environment:
-      - TZ=Europe/Istanbul
+      - TZ=Europe/Istanbul # Sync Timezone
     env_file:
       - .env
     volumes:
-      - ./data:/app/data
+      # Persistent Storage Volumes
+      - ./paper_db.sqlite3:/app/paper_db.sqlite3
       - ./logs:/app/logs
+      - ./models:/app/models
+      - ./reports:/app/reports
+    mem_limit: 1g
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
