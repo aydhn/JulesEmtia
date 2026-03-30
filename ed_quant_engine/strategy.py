@@ -1,69 +1,95 @@
 import pandas as pd
 import numpy as np
-from typing import Dict, Tuple, Optional
-from logger import log
+from logger import logger
+from portfolio_manager import portfolio_manager
+from ml_validator import ml_validator
+from sentiment_filter import sentiment_filter
+from execution_model import get_execution_price
 
-def check_entry_signal(df_aligned: pd.DataFrame, ticker: str) -> Optional[Dict]:
-    """
-    Generates trading signals based on Multi-Timeframe (MTF) confluence.
-    Requires HTF (Daily) and LTF (Hourly) alignment.
-    Returns: Signal Dictionary if valid, else None.
-    """
-    if df_aligned is None or df_aligned.empty or len(df_aligned) < 2:
+def generate_signals(df: pd.DataFrame, ticker: str, current_balance: float, open_positions: list, corr_matrix: pd.DataFrame, recent_trades: list) -> dict:
+    '''
+    Phase 4: Confluence Signal Generation & Risk Management
+    Phase 16: MTF Confluence Check
+    '''
+    if df.empty or len(df) < 200:
         return None
 
-    # We always use the PREVIOUS closed candle (shift 1 conceptually, but df[-1] is latest closed in our setup)
-    # Ensure we are not looking at an unclosed candle. Assuming df_aligned[-1] is fully closed.
-    current = df_aligned.iloc[-1]
+    # MUST evaluate using the *last closed candle* (iloc[-1])
+    # The `features.py` or `data_loader.py` MUST have handled `.shift(1)` logic.
+    last_row = df.iloc[-1]
 
-    # Check for NaNs in critical fields
-    required_cols = ['Close', 'EMA_50', 'RSI_14', 'MACD_hist', 'HTF_Close', 'HTF_EMA_50']
-    for col in required_cols:
-        if col not in current or pd.isna(current[col]):
-            return None
+    # 1. Extract values safely
+    close = last_row.get('Close', 0)
+    ema_50 = last_row.get('EMA_50', 0)
+    ema_200 = last_row.get('EMA_200', 0)
+    rsi = last_row.get('RSI_14', 50)
+    macd = last_row.get('MACD', 0)
+    macd_sig = last_row.get('MACD_signal', 0)
+    bb_lower = last_row.get('BB_lower', 0)
+    bb_upper = last_row.get('BB_upper', 0)
+    atr = last_row.get('ATR_14', 0)
 
-    signal = None
+    # Daily features (HTF)
+    close_1d = last_row.get('Close_1d', 0)
+    ema_50_1d = last_row.get('EMA_50_1d', 0)
+    macd_1d = last_row.get('MACD_1d', 0)
 
-    # --- LONG LOGIC ---
-    # HTF Filter: Daily Close > Daily EMA 50
-    is_htf_bullish = current['HTF_Close'] > current['HTF_EMA_50']
+    # Calculate average ATR for execution model
+    avg_atr = df['ATR_14'].rolling(50).mean().iloc[-1] if 'ATR_14' in df.columns else atr
 
-    # LTF Trigger: Hourly Price > Hourly EMA 50 AND (RSI crossing up from 30 OR touching lower BB)
-    is_ltf_bullish = current['Close'] > current['EMA_50']
-    rsi_oversold = current['RSI_14'] < 40 # Relaxed for testing, usually 30
-    macd_bullish = current['MACD_hist'] > 0
+    direction = None
 
-    if is_htf_bullish and is_ltf_bullish and rsi_oversold and macd_bullish:
-        signal = "Long"
+    # 2. MTF Confluence Rules (Phase 16)
+    # Long Condition: Daily trend up AND Hourly oversold/momentum up
+    if close_1d > ema_50_1d and macd_1d > 0: # HTF Filter
+        if close > ema_50 and (rsi < 30 or close <= bb_lower) and macd > macd_sig: # LTF Trigger
+            direction = "Long"
 
-    # --- SHORT LOGIC ---
-    is_htf_bearish = current['HTF_Close'] < current['HTF_EMA_50']
-    is_ltf_bearish = current['Close'] < current['EMA_50']
-    rsi_overbought = current['RSI_14'] > 60 # Usually 70
-    macd_bearish = current['MACD_hist'] < 0
+    # Short Condition: Daily trend down AND Hourly overbought/momentum down
+    elif close_1d < ema_50_1d and macd_1d < 0: # HTF Filter
+        if close < ema_50 and (rsi > 70 or close >= bb_upper) and macd < macd_sig: # LTF Trigger
+            direction = "Short"
 
-    if is_htf_bearish and is_ltf_bearish and rsi_overbought and macd_bearish:
-        signal = "Short"
-
-    if not signal:
+    if not direction:
         return None
 
-    # Calculate ATR-based dynamic Stops
-    atr = current['ATR_14']
-    entry_price = current['Close']
+    # 3. Validation Layers (Phase 11, 18, 20)
+    if portfolio_manager.correlation_veto(ticker, direction, open_positions, corr_matrix):
+        return None
 
-    if signal == "Long":
-        sl = entry_price - (1.5 * atr)
-        tp = entry_price + (3.0 * atr)
+    if not ml_validator.validate_signal(df, direction):
+        return None
+
+    if sentiment_filter.veto_signal(ticker, direction):
+        return None
+
+    # 4. Realistic Execution Price (Phase 21)
+    entry_price = get_execution_price(ticker, close, direction, atr, avg_atr)
+
+    # 5. Risk Management: Dynamic TP/SL (Phase 4)
+    # SL = 1.5 ATR, TP = 3.0 ATR
+    if direction == "Long":
+        sl_price = entry_price - (1.5 * atr)
+        tp_price = entry_price + (3.0 * atr)
     else:
-        sl = entry_price + (1.5 * atr)
-        tp = entry_price - (3.0 * atr)
+        sl_price = entry_price + (1.5 * atr)
+        tp_price = entry_price - (3.0 * atr)
+
+    # 6. Position Sizing via Kelly (Phase 15)
+    size = portfolio_manager.calculate_position_size(current_balance, entry_price, sl_price, recent_trades)
+
+    if size <= 0:
+        logger.warning(f"Zero position size calculated for {ticker}. Trade skipped.")
+        return None
+
+    logger.info(f"Signal Generated: {direction} {ticker} @ {entry_price:.4f} | SL: {sl_price:.4f} | TP: {tp_price:.4f} | Size: {size:.4f}")
 
     return {
         "ticker": ticker,
-        "direction": signal,
+        "direction": direction,
         "entry_price": entry_price,
-        "sl": sl,
-        "tp": tp,
+        "sl_price": sl_price,
+        "tp_price": tp_price,
+        "size": size,
         "atr": atr
     }

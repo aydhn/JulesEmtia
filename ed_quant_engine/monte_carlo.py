@@ -1,50 +1,49 @@
 import numpy as np
 import pandas as pd
-from logger import log
+from logger import logger
 
-def run_monte_carlo(trades_df: pd.DataFrame, num_simulations: int = 10000, initial_capital: float = 10000.0) -> dict:
-    """
-    Runs Monte Carlo simulation by shuffling historical PnL % returns with replacement.
-    """
-    if trades_df.empty or 'pnl' not in trades_df.columns:
-        return {}
+class MonteCarloSimulator:
+    def __init__(self, num_simulations=10000):
+        self.num_simulations = num_simulations
 
-    log.info(f"Running {num_simulations} Monte Carlo simulations...")
+    def run_simulation(self, trade_pnls: list) -> dict:
+        '''
+        Phase 22: Monte Carlo Risk Validation
+        Resamples trade returns to calculate Expected Drawdown & Risk of Ruin
+        '''
+        if not trade_pnls or len(trade_pnls) < 10:
+             return {"Error": "Not enough trades for simulation."}
 
-    # Extract trade return % (PnL / Capital before trade)
-    # Approximation: using initial capital for all returns for simplicity
-    returns_pct = (trades_df['pnl'] / initial_capital).values
-    num_trades = len(returns_pct)
+        pnls = np.array(trade_pnls)
+        sim_results = []
+        max_drawdowns = []
+        ruin_count = 0
+        ruin_threshold = 0.50 # 50% loss = Ruin
 
-    if num_trades < 50:
-        log.warning("Need at least 50 trades for reliable Monte Carlo.")
-        return {}
+        for _ in range(self.num_simulations):
+             # Resample with replacement
+             sim_trades = np.random.choice(pnls, size=len(pnls), replace=True)
 
-    # Vectorized Simulation: shape = (num_simulations, num_trades)
-    simulated_returns = np.random.choice(returns_pct, size=(num_simulations, num_trades), replace=True)
+             # Calculate equity curve
+             equity = 1.0 + sim_trades.cumsum()
 
-    # Calculate equity curves
-    # Add 1 to returns to calculate cumulative product
-    growth_factors = 1 + simulated_returns
-    equity_curves = initial_capital * np.cumprod(growth_factors, axis=1)
+             # Check for ruin
+             if np.any(equity <= (1.0 - ruin_threshold)):
+                  ruin_count += 1
 
-    # Calculate Max Drawdowns for each simulation
-    peaks = np.maximum.accumulate(equity_curves, axis=1)
-    drawdowns = (equity_curves - peaks) / peaks
-    max_drawdowns = np.min(drawdowns, axis=1) # Min because drawdowns are negative
+             # Calculate Drawdown
+             peak = np.maximum.accumulate(equity)
+             drawdown = (equity - peak) / peak
+             max_drawdowns.append(drawdown.min())
 
-    # Calculate Risk of Ruin (probability of hitting -50% DD)
-    ruin_threshold = -0.50
-    ruined_sims = np.sum(max_drawdowns <= ruin_threshold)
-    risk_of_ruin = ruined_sims / num_simulations
+        risk_of_ruin = ruin_count / self.num_simulations
+        expected_dd_95 = np.percentile(max_drawdowns, 5) # 5th percentile because DDs are negative
+        expected_dd_99 = np.percentile(max_drawdowns, 1)
 
-    # 95% and 99% CI Expected Max Drawdown
-    expected_mdd_95 = np.percentile(max_drawdowns, 5) # 5th percentile (worst 5%)
-    expected_mdd_99 = np.percentile(max_drawdowns, 1) # 1st percentile
+        logger.info(f"Monte Carlo: Risk of Ruin = {risk_of_ruin:.2%}, 99% Max DD = {expected_dd_99:.2%}")
 
-    return {
-        "Risk of Ruin": risk_of_ruin,
-        "Expected Max DD (95% CI)": expected_mdd_95,
-        "Expected Max DD (99% CI)": expected_mdd_99,
-        "Simulations": num_simulations
-    }
+        return {
+             "Risk_of_Ruin": risk_of_ruin,
+             "Max_DD_95": expected_dd_95,
+             "Max_DD_99": expected_dd_99
+        }

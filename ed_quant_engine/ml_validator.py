@@ -1,76 +1,79 @@
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
-import joblib
+from sklearn.model_selection import train_test_split
+from logger import logger
 import os
-from logger import log
-from config import MODEL_PATH
+import joblib
 
 class MLValidator:
-    def __init__(self, model_path=MODEL_PATH):
+    def __init__(self, model_path="models/rf_model.pkl"):
         self.model_path = model_path
-        self.model = self._load_model()
+        self.model = None
+        self._load_model()
 
     def _load_model(self):
         if os.path.exists(self.model_path):
             try:
-                return joblib.load(self.model_path)
+                self.model = joblib.load(self.model_path)
+                logger.info("RandomForest model loaded.")
             except Exception as e:
-                log.error(f"Error loading ML model: {e}")
-        return None
+                logger.error(f"Failed to load model: {e}")
+                self.model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
+        else:
+            self.model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
 
-    def train(self, df: pd.DataFrame):
-        """
-        Trains the Random Forest model to predict trade success.
-        df should contain historical features and a 'Target' column (1 for Win, 0 for Loss).
-        """
-        if 'Target' not in df.columns:
-            log.warning("No 'Target' column found for training.")
-            return False
+    def train(self, df: pd.DataFrame, target_col='Target'):
+        # Phase 18: Train Model
+        features = [col for col in df.columns if col not in ['Target', 'Close', 'Open', 'High', 'Low', 'Volume', 'Adj Close']]
 
-        features = df.drop(columns=['Target', 'time', 'Close', 'High', 'Low', 'Open', 'Volume'], errors='ignore')
-        target = df['Target']
+        # Ensure we have data
+        if df.empty or len(df) < 50:
+            logger.warning("Not enough data to train model.")
+            return
 
-        # Drop NaNs
-        valid_idx = features.dropna().index
-        features = features.loc[valid_idx]
-        target = target.loc[valid_idx]
+        # Create Target (1 if next 5 bars increase by 0.5%, 0 else) - Simplified example
+        df['Target'] = np.where(df['Close'].shift(-5) > df['Close'] * 1.005, 1, 0)
+        df.dropna(inplace=True)
 
-        if len(features) < 100:
-            log.warning("Not enough data to train ML model.")
-            return False
+        X = df[features]
+        y = df['Target']
 
-        self.model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=-1)
-        self.model.fit(features, target)
+        # Train-test split strictly chronological to prevent lookahead
+        split_idx = int(len(X) * 0.8)
+        X_train, X_test = X[:split_idx], X[split_idx:]
+        y_train, y_test = y[:split_idx], y[split_idx:]
 
-        # Save model
+        self.model.fit(X_train, y_train)
+        score = self.model.score(X_test, y_test)
+        logger.info(f"Model Retrained. Test Accuracy: {score:.2f}")
+
         os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
         joblib.dump(self.model, self.model_path)
-        log.info(f"ML Model trained and saved to {self.model_path}")
-        return True
 
-    def validate_signal(self, current_features: pd.Series, threshold: float = 0.55) -> bool:
-        """
-        Returns True if the ML model predicts a win probability > threshold.
-        """
-        if self.model is None:
-            log.warning("ML Model not loaded. Skipping ML validation.")
-            return True # Default to True if no model exists yet
+    def validate_signal(self, df: pd.DataFrame, direction: str, threshold=0.6) -> bool:
+        # Phase 18: Probability Threshold Veto
+        if not self.model or not hasattr(self.model, 'classes_'):
+            return True # Allow if no trained model
+
+        features = [col for col in df.columns if col not in ['Target', 'Close', 'Open', 'High', 'Low', 'Volume', 'Adj Close']]
+        last_row = df[features].iloc[[-1]]
 
         try:
-            # Format series for prediction
-            features = pd.DataFrame([current_features]).drop(columns=['time', 'Close', 'High', 'Low', 'Open', 'Volume', 'HTF_Close'], errors='ignore')
-            features = features.fillna(0) # Basic imputation
+            proba = self.model.predict_proba(last_row)[0]
+            # Assuming class 1 is positive outcome
+            success_prob = proba[1]
 
-            # Predict probability of class 1 (Win)
-            prob_win = self.model.predict_proba(features)[0][1]
-
-            if prob_win >= threshold:
-                log.info(f"ML Validator: Signal APPROVED (Prob: {prob_win:.2f})")
-                return True
-            else:
-                log.warning(f"ML Validator: Signal REJECTED (Prob: {prob_win:.2f} < {threshold})")
+            if direction == "Long" and success_prob < threshold:
+                logger.info(f"ML Veto: Long rejected. Success probability {success_prob:.2f} < {threshold}")
                 return False
+            elif direction == "Short" and (1 - success_prob) < threshold: # Assuming class 0 is price drop success
+                logger.info(f"ML Veto: Short rejected. Success probability {(1-success_prob):.2f} < {threshold}")
+                return False
+
+            return True
         except Exception as e:
-            log.error(f"ML Validation Error: {e}")
-            return True # Default to True on error to not block system
+             logger.error(f"ML Prediction Error: {e}")
+             return True # Default to allow if error
+
+ml_validator = MLValidator()

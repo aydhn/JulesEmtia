@@ -1,62 +1,70 @@
 import feedparser
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import nltk
-from typing import Dict, Optional
-from logger import log
-import time
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+from logger import logger
 
-# Download VADER lexicon if not present (only done once)
+# Phase 20: NLP Download
 try:
     nltk.data.find('sentiment/vader_lexicon')
 except LookupError:
-    nltk.download('vader_lexicon')
+    nltk.download('vader_lexicon', quiet=True)
 
-sia = SentimentIntensityAnalyzer()
+class SentimentFilter:
+    def __init__(self):
+        self.sia = SentimentIntensityAnalyzer()
+        # Free RSS feeds
+        self.rss_urls = [
+            "https://feeds.finance.yahoo.com/rss/2.0/headline?s=GC=F,SI=F,CL=F,USDTRY=X",
+            "https://www.investing.com/rss/news_285.rss" # Commodities
+        ]
+        self.cache = {}
 
-# Basic mapping of tickers to keywords for filtering
-TICKER_KEYWORDS = {
-    "GC=F": ["gold", "precious metals", "safe haven"],
-    "SI=F": ["silver", "precious metals"],
-    "CL=F": ["oil", "crude", "energy", "opec"],
-    "USDTRY=X": ["lira", "turkey", "cbrt", "emerging markets"]
-    # ... expand as needed
-}
-
-def analyze_sentiment(ticker: str) -> float:
-    """
-    Fetches latest RSS feeds related to the ticker and calculates
-    an average compound sentiment score (-1 to 1).
-    """
-    rss_urls = [
-        "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^GSPC,^DJI,^IXIC", # General market
-        f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}" # Specific ticker
-    ]
-
-    keywords = TICKER_KEYWORDS.get(ticker, [])
-
-    total_score = 0.0
-    count = 0
-
-    for url in rss_urls:
+    async def fetch_news(self):
         try:
-            feed = feedparser.parse(url)
-            for entry in feed.entries[:10]: # Check last 10 articles
-                title = entry.title.lower()
+            articles = []
+            for url in self.rss_urls:
+                feed = feedparser.parse(url)
+                for entry in feed.entries[:10]: # Get top 10
+                    articles.append({
+                        'title': entry.title,
+                        'summary': entry.get('summary', '')
+                    })
 
-                # If keywords defined, skip articles not containing them
-                if keywords and not any(kw in title for kw in keywords):
-                    continue
-
-                score = sia.polarity_scores(entry.title)['compound']
-                total_score += score
-                count += 1
-
+            self._analyze_sentiment(articles)
         except Exception as e:
-            log.warning(f"Error parsing RSS feed for {ticker}: {e}")
+            logger.error(f"RSS fetch error: {e}")
 
-    if count == 0:
-        return 0.0 # Neutral if no relevant news
+    def _analyze_sentiment(self, articles):
+        if not articles: return
 
-    avg_score = total_score / count
-    log.info(f"Sentiment Score for {ticker}: {avg_score:.2f} (based on {count} articles)")
-    return avg_score
+        scores = []
+        for article in articles:
+            text = f"{article['title']} {article['summary']}"
+            score = self.sia.polarity_scores(text)
+            scores.append(score['compound'])
+
+        avg_score = sum(scores) / len(scores) if scores else 0
+        self.cache['global_sentiment'] = avg_score
+        logger.info(f"Global Sentiment Score updated: {avg_score:.2f}")
+
+    def veto_signal(self, ticker: str, direction: str) -> bool:
+        '''
+        Phase 20: Sentiment Veto
+        '''
+        if 'global_sentiment' not in self.cache:
+            return False
+
+        score = self.cache['global_sentiment']
+
+        # If extreme negative news (-0.5), veto Longs
+        if score < -0.5 and direction == "Long":
+            logger.info(f"Sentiment Veto: {direction} {ticker} rejected. Extremely negative news flow ({score:.2f}).")
+            return True
+        # If extreme positive news (+0.5), veto Shorts
+        elif score > 0.5 and direction == "Short":
+            logger.info(f"Sentiment Veto: {direction} {ticker} rejected. Extremely positive news flow ({score:.2f}).")
+            return True
+
+        return False
+
+sentiment_filter = SentimentFilter()

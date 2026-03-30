@@ -1,36 +1,16 @@
-# Use slim image for minimal footprint
 FROM python:3.10-slim
+WORKDIR /app
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
-ENV TZ=Europe/Istanbul
+# Install build dependencies for compiling pandas/numpy if needed
+RUN apt-get update && apt-get install -y --no-install-recommends     build-essential     && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        build-essential \
-        gcc \
-        libsqlite3-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create user
-RUN useradd -m quantuser
-
-WORKDIR /home/quantuser/app
 COPY requirements.txt .
-
-RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download NLTK data during build
-RUN python -m nltk.downloader vader_lexicon
-
-# Copy application code
-COPY . .
-
-# Set permissions
-RUN chown -R quantuser:quantuser /home/quantuser/app
+# Create non-root user (Phase 25 Best Practice)
+RUN useradd -m quantuser && chown -R quantuser:quantuser /app
 USER quantuser
 
-CMD ["python", "main.py"]
+COPY . .
+
+CMD ["python", "main.py"]\n

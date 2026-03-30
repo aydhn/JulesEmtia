@@ -1,27 +1,7 @@
-# Security
 .env
-*.pem
-
-# Data and Logs
-data/
-logs/
-*.sqlite3
-*.db
-*.log
-*.pkl
-
-# Python
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-
-# Environments
-.venv/
-venv/
-env/
-.env/
-
-# IDE
-.vscode/
-.idea/
+logs/
+models/
+paper_db.sqlite3
+.vscode/\n
