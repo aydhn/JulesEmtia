@@ -1,21 +1,47 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Environments
-.env
-.venv
+*.py[cod]
+*$py.class
+*.so
+.Python
 env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
 venv/
+.venv/
 ENV/
 
 # VS Code
 .vscode/
 
-# Project specifics
-paper_db.sqlite3
-logs/
-*.log
-rf_model.pkl
+# Project Specific
+.env
+data/*.db
+data/*.sqlite3
+logs/*.log
+models/*.pkl
+models/*.joblib
+reports/*.pdf
+reports/*.html
+
+# Pytest / Coverage
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+.cache

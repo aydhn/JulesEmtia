@@ -1,39 +1,40 @@
 # ED Capital Quant Engine
 
-**ED Capital Quant Engine**, otonom, düşük frekanslı (Low Frequency) ve yüksek isabet oranına (High Win-Rate) odaklanan kurumsal bir algoritmik ticaret ve paper trade motorudur. Proje, tamamen ücretsiz kütüphaneler (Yfinance, TA-Lib, NLTK) ile Python tabanlı modüler bir yapıda (SOLID) geliştirilmiştir.
+A professional, zero-budget, multi-timeframe quantitative trading engine built in Python. Designed for high win-rate strategies across Commodities and TRY-based Forex pairs.
 
-## Proje Mimarisi
-* **Sıfır Bütçe**: Hiçbir ücretli API veya scraping (Selenium/BS4) kullanılmaz.
-* **Makro Filtreler**: DXY, ABD 10 Yıllık Tahvil ve VIX devre kesicileri ile ters rüzgarlarda işlem engellenir (Siyah Kuğu koruması).
-* **Gelişmiş Risk Yönetimi**: ATR tabanlı Dinamik İzleyen Stop, Fractional Kelly (Kasa Yönetimi), Korelasyon Vetosu ve Monte Carlo İflas Riski (Risk of Ruin) ölçümleri.
-* **ML ve NLP Doğrulaması**: YFinance verilerinden türetilen Random Forest modeli ve NLTK VADER ile RSS haberlerinden çekilen Sentiment skorları.
+## Architecture & Features
+- **Zero-Budget Data:** Uses `yfinance` exclusively. No paid APIs or scraping tools.
+- **Multi-Timeframe Confluence (MTF):** Aligns HTF (Daily) trends with LTF (Hourly) entry triggers without Lookahead Bias (`pd.merge_asof(direction='backward')`).
+- **Dynamic Risk Management:** Features ATR-based trailing stops, fractional Kelly Criterion position sizing, and correlation vetoes to prevent risk duplication.
+- **Black Swan Protection:** Integrates a VIX circuit breaker and Z-Score anomaly detection to halt trading during flash crashes.
+- **Machine Learning Validation:** Employs a local `RandomForestClassifier` via `scikit-learn` to filter out low-probability technical signals based on historical patterns.
+- **NLP Sentiment Veto:** Uses `feedparser` and `NLTK VADER` to read RSS news headlines, vetoing technical signals that directly contradict macroeconomic sentiment.
+- **Realistic Execution:** Simulates slippage and spreads dynamically based on current volatility to ensure paper trade PnL reflects reality.
+- **Robustness Testing:** Includes a vectorized backtester, Walk-Forward Optimization (WFO), and a Monte Carlo engine measuring the "Risk of Ruin".
+- **Institutional Reporting:** Automatically generates PDF/HTML Tearsheets benchmarking performance against inflation and USD/TRY holding returns.
+- **Two-Way Telegram Commands:** Supports commands like `/durum`, `/durdur`, `/devam`, `/kapat_hepsi`, `/tara` for manual overrides.
 
-## Kurulum ve Kullanım
+## Setup Instructions
 
-### Yerel Kurulum
-1. `.env` dosyasını oluşturun:
-   `cp .env.template .env`
-   İçerisine `TELEGRAM_BOT_TOKEN` ve `ADMIN_CHAT_ID` değerlerini girin.
+1. **Clone & Env:**
+   Copy `.env.example` to `.env` and configure your Telegram credentials (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`).
 
-2. Sanal ortam (venv) oluşturun ve bağımlılıkları yükleyin:
+2. **Docker Deployment (Recommended):**
+   The entire system is containerized with proper volume mapping to preserve SQLite states (`paper_db.sqlite3`), ML models, and logs.
+
+   ```bash
+   chmod +x manage_bot.sh
+   ./manage_bot.sh start
+   ```
+
+3. **Manual Execution (Virtual Environment):**
    ```bash
    python3 -m venv venv
    source venv/bin/activate
    pip install -r requirements.txt
-   ```
-
-3. Sistemi Başlatın:
-   ```bash
    python main.py
    ```
 
-### Docker Üzerinden Kurulum (Önerilen)
-Yönetim betiğini kullanarak tüm konteyner altyapısını ayağa kaldırabilirsiniz:
-```bash
-./manage_bot.sh start
-```
-
-Logları İzlemek için:
-```bash
-./manage_bot.sh logs
-```
+## Operations
+- All alerts, performance summaries, and trade executions are communicated exclusively via Telegram.
+- Background execution is managed by Docker or the provided `quant_bot.service` systemd unit file.
