@@ -1,106 +1,78 @@
 import pandas as pd
 import numpy as np
-import sqlite3
-import config
-from logger import logger
+from typing import List, Dict, Tuple
+from logger import log
+from data_loader import UNIVERSE, _download_yf_data
 
-class PortfolioManager:
-    def __init__(self, db_path=config.DB_PATH):
-        self.db_path = db_path
-        self.max_positions = 4
-        self.max_global_exposure_pct = 0.06 # 6% max total risk
+# Threshold for correlation: +0.75 means highly correlated, -0.75 means highly inversely correlated
+CORRELATION_THRESHOLD = 0.75
 
-    def calculate_correlation_matrix(self, returns_df: pd.DataFrame, period=30):
-        ''' Phase 11: Dynamic Correlation Matrix '''
-        if returns_df.empty or len(returns_df) < period:
+def calculate_correlation_matrix(period: str = "60d") -> pd.DataFrame:
+    """
+    Downloads historical close prices for the entire universe
+    and returns a rolling Pearson Correlation Matrix.
+    """
+    try:
+        prices_dict = {}
+        for name, ticker in UNIVERSE.items():
+            df = _download_yf_data(ticker, "1d", period)
+            if not df.empty:
+                prices_dict[ticker] = df['close']
+
+        if not prices_dict:
             return pd.DataFrame()
-        return returns_df.tail(period).corr(method='pearson')
 
-    async def fetch_daily_returns_matrix(self, tickers: list, period="3mo") -> pd.DataFrame:
-        import yfinance as yf
-        import asyncio
-        try:
-            # Download concurrently to avoid blocking
-            data = await asyncio.to_thread(yf.download, tickers, period=period, interval="1d", progress=False)
-            if 'Close' in data.columns:
-                 closes = data['Close']
-                 # Calculate daily pct change
-                 returns_df = closes.pct_change().dropna()
-                 return returns_df
-        except Exception as e:
-            logger.error(f"Error fetching correlation matrix returns: {e}")
+        prices_df = pd.DataFrame(prices_dict)
+        corr_matrix = prices_df.corr(method='pearson')
+        return corr_matrix
+
+    except Exception as e:
+        log.error(f"Failed to calculate correlation matrix: {e}")
         return pd.DataFrame()
 
-    def correlation_veto(self, new_ticker: str, new_direction: str, open_positions: list, corr_matrix: pd.DataFrame, threshold=0.75) -> bool:
-        ''' Phase 11: Risk Duplication Filter '''
-        if corr_matrix.empty or new_ticker not in corr_matrix.columns:
-            return False
 
-        for pos in open_positions:
-            existing_ticker = pos['ticker']
-            existing_dir = pos['direction']
-
-            if existing_ticker in corr_matrix.columns:
-                corr = corr_matrix.loc[new_ticker, existing_ticker]
-
-                # If high positive correlation and same direction -> VETO
-                if corr > threshold and new_direction == existing_dir:
-                     logger.warning(f"Correlation Veto: {new_ticker} ({new_direction}) is highly correlated ({corr:.2f}) with open {existing_ticker} ({existing_dir}).")
-                     return True
-
-                # If high negative correlation and opposite direction -> VETO
-                elif corr < -threshold and new_direction != existing_dir:
-                     logger.warning(f"Correlation Veto: {new_ticker} ({new_direction}) is negatively correlated ({corr:.2f}) with open {existing_ticker} ({existing_dir}). Risk duplicated.")
-                     return True
-
+def is_correlation_veto(new_ticker: str, new_direction: str, open_trades: List[Dict], corr_matrix: pd.DataFrame) -> bool:
+    """
+    Risk Duplication Filter: Prevents opening a new trade if we already have an open
+    trade in a highly correlated asset in the same direction.
+    """
+    if corr_matrix.empty or new_ticker not in corr_matrix.columns:
         return False
 
-    def get_kelly_fraction(self, recent_trades: list) -> float:
-        ''' Phase 15: Fractional Kelly Criterion '''
-        if not recent_trades or len(recent_trades) < 10:
-             return 0.02 # Default fallback risk
+    for trade in open_trades:
+        existing_ticker = trade['ticker']
+        existing_direction = trade['direction']
 
-        wins = [t for t in recent_trades if t['pnl'] > 0]
-        losses = [t for t in recent_trades if t['pnl'] <= 0]
+        if existing_ticker in corr_matrix.columns:
+            correlation = corr_matrix.loc[new_ticker, existing_ticker]
 
-        p = len(wins) / len(recent_trades)
-        q = 1 - p
+            # If the assets move together (> 0.75) AND we're betting the same way -> Veto (Risk duplication)
+            if correlation > CORRELATION_THRESHOLD and new_direction == existing_direction:
+                log.warning(f"Correlation Veto: {new_ticker} ({new_direction}) is highly correlated ({correlation:.2f}) with open trade {existing_ticker} ({existing_direction}).")
+                return True
 
-        avg_win = sum(t['pnl'] for t in wins) / len(wins) if wins else 0
-        avg_loss = abs(sum(t['pnl'] for t in losses) / len(losses)) if losses else 1
+            # If the assets move opposite (< -0.75) AND we're betting opposite ways -> Veto (Risk duplication)
+            elif correlation < -CORRELATION_THRESHOLD and new_direction != existing_direction:
+                log.warning(f"Inverse Correlation Veto: {new_ticker} ({new_direction}) is highly inverse correlated ({correlation:.2f}) with open trade {existing_ticker} ({existing_direction}).")
+                return True
 
-        if avg_loss == 0: return 0.02
+    return False
 
-        b = avg_win / avg_loss
 
-        if b == 0: return 0.0
-
-        # Kelly Formula: f = (bp - q) / b
-        f_star = (b * p - q) / b
-
-        # JP Morgan Risk: Half-Kelly
-        fractional_kelly = f_star / 2.0
-
-        # Hard Cap at 4%
-        fractional_kelly = min(max(fractional_kelly, 0.005), 0.04)
-
-        return fractional_kelly
-
-    def calculate_position_size(self, account_balance: float, entry_price: float, sl_price: float, recent_trades: list) -> float:
-        ''' Calculates unit size based on Kelly risk % and distance to Stop Loss. '''
-        risk_pct = self.get_kelly_fraction(recent_trades)
-        capital_at_risk = account_balance * risk_pct
-
-        sl_distance = abs(entry_price - sl_price)
-        if sl_distance == 0: return 0.0
-
-        position_size = capital_at_risk / sl_distance
-        return position_size
-
-    def check_global_limits(self, open_positions: list) -> bool:
-        if len(open_positions) >= self.max_positions:
-             logger.warning(f"Global Limit Veto: Max positions ({self.max_positions}) reached.")
-             return False
+def check_global_limits(open_trades: List[Dict], max_positions: int, global_exposure_limit: float, current_capital: float) -> bool:
+    """
+    Ensures the portfolio does not exceed predefined risk limits.
+    Returns True if limits are EXCEEDED, False if safe to proceed.
+    """
+    if len(open_trades) >= max_positions:
+        log.warning(f"Global Limit Veto: Maximum positions reached ({max_positions}).")
         return True
 
-portfolio_manager = PortfolioManager()
+    total_exposure = sum(trade['position_size'] * trade['entry_price'] for trade in open_trades)
+    max_allowed_exposure = current_capital * global_exposure_limit
+
+    if total_exposure >= max_allowed_exposure:
+        log.warning(f"Global Limit Veto: Portfolio exposure ({total_exposure:.2f}) exceeds limit ({max_allowed_exposure:.2f}).")
+        return True
+
+    return False

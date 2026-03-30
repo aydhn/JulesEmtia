@@ -1,126 +1,81 @@
 import pandas as pd
 import numpy as np
-from logger import logger
-from backtester import Backtester
+from typing import Dict, List, Tuple
+from logger import log
+from backtester import VectorizedBacktester
+from data_loader import fetch_mtf_data, UNIVERSE
+from features import add_features
 
-class WalkForwardOptimizer:
-    def __init__(self, strategy_func):
-        self.strategy_func = strategy_func
-        self.backtester = Backtester()
+def run_wfo(ticker: str, window_is: int = 500, window_oos: int = 125) -> pd.DataFrame:
+    """
+    Walk-Forward Optimization (Phase 14).
+    Tests Strategy robustness by sliding an In-Sample (IS) training window
+    and an Out-of-Sample (OOS) testing window across historical data.
+    Evaluates Walk-Forward Efficiency (WFE).
+    """
+    try:
+        log.info(f"Starting Walk-Forward Optimization for {ticker}...")
 
-    def run_wfo(self, df: pd.DataFrame, params_grid: dict, train_window=252*2, test_window=252//2):
-        '''
-        Phase 14: Rolling Window Walk-Forward Optimization
-        Dynamically divides historical data into In-Sample (IS) and Out-of-Sample (OOS) windows,
-        optimizes on IS, tests on OOS, and calculates Walk-Forward Efficiency (WFE).
-        '''
-        if df.empty or len(df) < (train_window + test_window):
-            logger.warning("Insufficient data for WFO.")
-            return None
+        # We need synchronous data fetching for WFO to avoid asyncio loop issues in scripts
+        import yfinance as yf
+        df = yf.download(ticker, period="5y", interval="1d", progress=False)
+        if df.empty: return pd.DataFrame()
 
-        wfo_results = []
-        start_idx = 0
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
+        df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
+        df = df.ffill().dropna()
 
-        while start_idx + train_window + test_window <= len(df):
-            train_end = start_idx + train_window
-            test_end = train_end + test_window
+        df = add_features(df)
+        if df.empty or len(df) < (window_is + window_oos):
+            log.warning(f"Not enough data for WFO on {ticker}")
+            return pd.DataFrame()
 
-            # Split data
-            df_is = df.iloc[start_idx:train_end].copy()
-            df_oos = df.iloc[train_end:test_end].copy()
+        backtester = VectorizedBacktester()
+        results = []
 
-            logger.info(f"WFO Window [{start_idx}:{test_end}]: Optimizing on {len(df_is)} bars, Testing on {len(df_oos)} bars.")
+        num_windows = (len(df) - window_is) // window_oos
 
-            # 1. Optimize on In-Sample (IS)
-            # This calls the Backtester's grid search. We mock the `strategy_func` passing for this example.
-            best_params, is_metrics = self.backtester.optimize_parameters(df_is, params_grid, self.strategy_func)
+        for i in range(num_windows):
+            start_is = i * window_oos
+            end_is = start_is + window_is
+            end_oos = end_is + window_oos
 
-            # Calculate annualized IS PnL (assuming daily data for simplification)
-            is_years = len(df_is) / 252
-            is_annual_pnl = is_metrics['Total PnL'] / is_years if is_years > 0 else 0
+            df_is = df.iloc[start_is:end_is]
+            df_oos = df.iloc[end_is:end_oos]
 
-            # 2. Test on Out-of-Sample (OOS) with the *best* parameters found in IS
-            # df_oos_signaled = self.strategy_func(df_oos, **best_params) # Real implementation
-            df_oos_signaled = df_oos.copy() # Placeholder
+            trades_is = backtester.run_backtest(df_is, ticker)
+            trades_oos = backtester.run_backtest(df_oos, ticker)
 
-            self.backtester.run_vectorized_backtest(df_oos_signaled)
-            oos_metrics = self.backtester.calculate_metrics()
+            pnl_is = trades_is['pnl_pct'].sum() if not trades_is.empty else 0.0
+            pnl_oos = trades_oos['pnl_pct'].sum() if not trades_oos.empty else 0.0
 
-            # Calculate annualized OOS PnL
-            oos_years = len(df_oos) / 252
-            oos_annual_pnl = oos_metrics['Total PnL'] / oos_years if oos_years > 0 else 0
+            # Annualize Returns
+            ann_pnl_is = pnl_is * (252 / window_is)
+            ann_pnl_oos = pnl_oos * (252 / window_oos)
 
-            # 3. Walk-Forward Efficiency (WFE) Calculation
-            # WFE = OOS Annual PnL / IS Annual PnL
-            # If WFE < 50%, the parameter set is considered "overfitted"
-            wfe = 0.0
-            if is_annual_pnl > 0:
-                wfe = oos_annual_pnl / is_annual_pnl
+            # Walk-Forward Efficiency (WFE)
+            wfe = ann_pnl_oos / ann_pnl_is if ann_pnl_is > 0 else 0.0
 
-            logger.info(f"OOS Metrics: {oos_metrics} | WFE: {wfe:.2%}")
+            # Overfit Veto: If WFE < 50%, the parameter set failed to generalize
+            is_overfit = wfe < 0.50
 
-            if wfe < 0.50:
-                logger.warning(f"WFE {wfe:.2%} < 50%. Parameter set {best_params} is overfitted and rejected for this window.")
-
-            # 4. Robustness Check (Neighborhood Variance)
-            # A simple implementation: check if slight variations of `best_params` yield drastically different results.
-            # E.g., if best RSI period is 14, check 13 and 15.
-            robustness_score = self._calculate_robustness(df_is, best_params, is_metrics['Total PnL'])
-            logger.info(f"Robustness Score (Variance): {robustness_score:.2f}")
-
-            wfo_results.append({
-                'start_idx': start_idx,
-                'train_end': train_end,
-                'test_end': test_end,
-                'best_params': best_params,
-                'is_metrics': is_metrics,
-                'oos_metrics': oos_metrics,
-                'wfe': wfe,
-                'robustness_score': robustness_score
+            results.append({
+                "Window": i+1,
+                "IS_Start": df_is.index[0].strftime('%Y-%m-%d'),
+                "IS_End": df_is.index[-1].strftime('%Y-%m-%d'),
+                "OOS_End": df_oos.index[-1].strftime('%Y-%m-%d'),
+                "IS_PnL": pnl_is,
+                "OOS_PnL": pnl_oos,
+                "WFE": wfe,
+                "Overfit": is_overfit
             })
 
-            # Slide window forward by the test_window step
-            start_idx += test_window
+        wfo_df = pd.DataFrame(results)
+        log.info(f"WFO Completed for {ticker}. Avg WFE: {wfo_df['WFE'].mean():.2f}")
+        return wfo_df
 
-        logger.info("Walk-Forward Optimization Complete.")
-        return pd.DataFrame(wfo_results)
+    except Exception as e:
+        log.error(f"WFO failed for {ticker}: {e}")
+        return pd.DataFrame()
 
-    def _calculate_robustness(self, df_is: pd.DataFrame, best_params: dict, best_pnl: float) -> float:
-        '''
-        Phase 14: Parameter Robustness Check
-        Evaluates the variance of PnL in the immediate neighborhood of the best parameters.
-        A highly robust strategy will have low variance (similar PnL) for slightly altered parameters.
-        '''
-        if not best_params:
-            return 0.0
-
-        neighbor_pnls = []
-
-        # Simple robustness: vary integer parameters by +/- 1
-        for key, val in best_params.items():
-            if isinstance(val, int) and val > 1:
-                # Test +1
-                neighbor_params_up = best_params.copy()
-                neighbor_params_up[key] = val + 1
-                # self.backtester.run_vectorized_backtest(self.strategy_func(df_is, **neighbor_params_up))
-                # metrics_up = self.backtester.calculate_metrics()
-                # neighbor_pnls.append(metrics_up['Total PnL'])
-
-                # Test -1
-                neighbor_params_down = best_params.copy()
-                neighbor_params_down[key] = val - 1
-                # self.backtester.run_vectorized_backtest(self.strategy_func(df_is, **neighbor_params_down))
-                # metrics_down = self.backtester.calculate_metrics()
-                # neighbor_pnls.append(metrics_down['Total PnL'])
-
-                # Mocking PnL for example
-                neighbor_pnls.extend([best_pnl * 0.95, best_pnl * 1.05])
-
-        if not neighbor_pnls:
-            return 1.0 # Perfectly robust if no parameters to vary
-
-        # Variance as a percentage of the best PnL
-        variance = np.var(neighbor_pnls)
-        robustness_score = 1.0 / (1.0 + variance) # Inverse variance for a score
-
-        return robustness_score

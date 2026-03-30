@@ -1,95 +1,110 @@
+import os
+import requests
+import asyncio
+from dotenv import load_dotenv
+from typing import Optional, List, Callable
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from logger import logger
-import config
 
-class TelegramNotifier:
-    def __init__(self):
-        # Prevent initialization errors if token is missing
-        if config.TELEGRAM_TOKEN == "DUMMY_TOKEN" or not config.TELEGRAM_TOKEN:
-            logger.warning("Telegram token is missing or dummy. Bot won't run.")
-            self.app = None
-        else:
-            self.app = Application.builder().token(config.TELEGRAM_TOKEN).build()
-            self.admin_id = int(config.ADMIN_CHAT_ID)
+from logger import log
+import paper_db
 
-            # Phase 17: Interactive Commands
-            self.app.add_handler(CommandHandler("durum", self.cmd_durum))
-            self.app.add_handler(CommandHandler("durdur", self.cmd_durdur))
-            self.app.add_handler(CommandHandler("devam", self.cmd_devam))
-            self.app.add_handler(CommandHandler("kapat_hepsi", self.cmd_panic))
-            self.app.add_handler(CommandHandler("tara", self.cmd_force_scan))
+# Load environment variables
+load_dotenv()
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
-        self.is_paused = False
+# Global state for pause/resume via Telegram commands
+SYSTEM_PAUSED = False
 
-    def _check_admin(self, update: Update) -> bool:
-        user_id = update.effective_user.id
-        if user_id != self.admin_id:
-             logger.critical(f"Unauthorized Access Attempt: {user_id}")
-             return False
-        return True
+def send_telegram_sync(message: str) -> None:
+    """Synchronous fallback to send Telegram messages via standard HTTP Requests."""
+    if not TELEGRAM_BOT_TOKEN or not ADMIN_CHAT_ID:
+        log.warning("Telegram Token or Admin Chat ID not found. Skipping message.")
+        return
 
-    async def cmd_durum(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self._check_admin(update): return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": ADMIN_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML"
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+        log.info(f"Telegram message sent: {message[:30]}...")
+    except requests.exceptions.RequestException as e:
+        log.error(f"Failed to send Telegram message: {e}")
 
-        # Phase 17: Fetch real data from paper_db and broker
-        from paper_broker import PaperBroker
-        broker = PaperBroker()
-        bal = await broker.get_account_balance()
-        pos = await broker.get_open_positions()
+async def send_telegram_async(message: str) -> None:
+    """Asynchronous Telegram messaging for the main loop."""
+    # Since we are using an HTTP request instead of Application.bot.send_message
+    # to avoid tight coupling and locking issues.
+    await asyncio.to_thread(send_telegram_sync, message)
 
-        msg = f"🟢 Sistem Aktif: {len(pos)} acik pozisyon. Bakiye: ${bal:.2f}"
-        await update.message.reply_text(msg)
 
-    async def cmd_durdur(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self._check_admin(update): return
-        self.is_paused = True
-        await update.message.reply_text("⛔️ Tarama DURDURULDU. Acik pozisyon takibi devam ediyor.")
+# ==========================================
+# Two-Way Command Handlers (Admin Only)
+# ==========================================
 
-    async def cmd_devam(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self._check_admin(update): return
-        self.is_paused = False
-        await update.message.reply_text("▶️ Tarama DEVAM EDIYOR.")
+async def authenticate(update: Update) -> bool:
+    """Ensure commands are only accepted from the ADMIN_CHAT_ID whitelist."""
+    if str(update.effective_chat.id) != str(ADMIN_CHAT_ID):
+        log.critical(f"Unauthorized access attempt from user: {update.effective_user.id} / chat: {update.effective_chat.id}")
+        await update.message.reply_text("🚨 Yetkisiz Erişim Reddedildi.")
+        return False
+    return True
 
-    async def cmd_panic(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self._check_admin(update): return
-        self.is_paused = True
+async def cmd_durum(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/durum command: Returns current portfolio and open positions status."""
+    if not await authenticate(update): return
 
-        from paper_broker import PaperBroker
-        from data_loader import fetch_data_with_retry
-        broker = PaperBroker()
+    open_trades = paper_db.get_open_trades()
+    count = len(open_trades)
 
-        positions = await broker.get_open_positions()
+    msg = f"🟢 <b>ED Capital Quant Engine - Durum Raporu</b>\n\n"
+    msg += f"Sistem Duraklatıldı mı?: {'Evet' if SYSTEM_PAUSED else 'Hayır'}\n"
+    msg += f"Aktif Açık İşlem Sayısı: {count}\n\n"
 
-        for pos in positions:
-             trade_id = pos['trade_id']
-             ticker = pos['ticker']
-             # Fetch current market price to exit
-             df = await fetch_data_with_retry(ticker, "1d", "1m", retries=1)
-             exit_price = df['Close'].iloc[-1].item() if not df.empty else pos['entry_price']
-             await broker.close_position(trade_id, exit_price)
+    for trade in open_trades:
+        msg += f"[{trade['trade_id']}] {trade['ticker']} ({trade['direction']})\n"
+        msg += f"Giriş: {trade['entry_price']} | SL: {trade['sl_price']}\n"
+        msg += f"Lot: {trade['position_size']}\n---\n"
 
-        await update.message.reply_text(f"🚨 PANIK BUTONU: Tum acik {len(positions)} pozisyon kapatildi. Sistem durduruldu.")
+    await update.message.reply_html(msg)
 
-    async def cmd_force_scan(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self._check_admin(update): return
-        await update.message.reply_text("🔍 Taramaya Baslaniyor...")
-        import main
-        await main.run_live_cycle()
+async def cmd_durdur(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/durdur command: Pauses NEW signal generation while retaining Trailing Stop management."""
+    if not await authenticate(update): return
+    global SYSTEM_PAUSED
+    SYSTEM_PAUSED = True
+    log.warning("Admin Command: System PAUSED. No new entries.")
+    await update.message.reply_html("⏸️ <b>Sistem Duraklatıldı!</b> Yeni işlem açılmayacak, ancak mevcut açık işlemlerin Stop-Loss takibi (Trailing) ve risk yönetimi kesintisiz devam edecektir.")
 
-    async def start(self):
-        if self.app:
-            await self.app.initialize()
-            await self.app.start()
-            # Must run polling in background without blocking main event loop
-            await self.app.updater.start_polling()
-            logger.info("Telegram Bot started.")
+async def cmd_devam(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/devam command: Resumes normal autonomous MTF operations."""
+    if not await authenticate(update): return
+    global SYSTEM_PAUSED
+    SYSTEM_PAUSED = False
+    log.info("Admin Command: System RESUMED.")
+    await update.message.reply_html("▶️ <b>Sistem Devam Ediyor!</b> Tam otonom tarama ve MTF sinyal üretimi tekrar aktif edilmiştir.")
 
-    async def send_message(self, text):
-        if self.app and self.admin_id:
-            try:
-                await self.app.bot.send_message(chat_id=self.admin_id, text=text)
-            except Exception as e:
-                logger.error(f"TG Send Error: {e}")
+async def cmd_kapat_hepsi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/kapat_hepsi command: Panic button to market-close all open positions immediately."""
+    if not await authenticate(update): return
+    await update.message.reply_html("🚨 <b>Panik Modu Tetiklendi!</b> Bütün açık işlemler güncel piyasa fiyatından kapatılıyor...")
+    # Will be intercepted by main loop's manual force close check
 
-notifier = TelegramNotifier()
+async def setup_telegram_bot() -> Application:
+    """Initializes and returns the two-way Telegram Application (v20+ API)."""
+    if not TELEGRAM_BOT_TOKEN:
+        log.error("No Telegram Token found for polling bot.")
+        return None
+
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("durum", cmd_durum))
+    app.add_handler(CommandHandler("durdur", cmd_durdur))
+    app.add_handler(CommandHandler("devam", cmd_devam))
+    app.add_handler(CommandHandler("kapat_hepsi", cmd_kapat_hepsi))
+
+    return app

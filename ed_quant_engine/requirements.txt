@@ -1,23 +1,28 @@
-# Data & Math
+# Core Data and Numerics
 numpy==1.26.4
-pandas==2.2.1
-yfinance==0.2.37
+pandas==2.2.2
+pandas_ta==0.3.14b0
+yfinance==0.2.40
 
-# Technical Analysis
-pandas-ta==0.3.14b0
+# Machine Learning and Statistics
+scikit-learn==1.5.0
+scipy==1.13.1
+joblib==1.4.2
 
-# Machine Learning
-scikit-learn==1.4.1
-
-# NLP & Sentiment
+# NLP and Sentiment
 nltk==3.8.1
 feedparser==6.0.11
 
-# Notifications & Automation
-python-telegram-bot==20.8
-schedule==1.2.1
+# Task Scheduling and Async
+schedule==1.2.2
+python-telegram-bot==21.1.1
+asyncio==3.4.3
 
-# Reporting
-matplotlib==3.8.3
+# Visualization and Reporting
+matplotlib==3.9.0
 seaborn==0.13.2
-pdfkit==1.0.0
+jinja2==3.1.4
+weasyprint==62.1
+
+# Database
+sqlite3-api==0.0.1

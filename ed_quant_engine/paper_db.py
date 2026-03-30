@@ -1,36 +1,71 @@
 import sqlite3
-import config
-from logger import logger
+import os
+import pandas as pd
+from typing import List, Dict, Optional
 from datetime import datetime
 
-class PaperDB:
-    def __init__(self, db_path=config.DB_PATH):
-        self.db_path = db_path
-        self._init_db()
+# Local SQLite DB to avoid paid DB infrastructure.
+DB_PATH = os.path.join(os.path.dirname(__file__), 'paper_db.sqlite3')
 
-    def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute('''CREATE TABLE IF NOT EXISTS trades (
-                trade_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT, direction TEXT, entry_time TEXT,
-                entry_price REAL, sl_price REAL, tp_price REAL,
-                position_size REAL, status TEXT, exit_time TEXT,
-                exit_price REAL, pnl REAL
-            )''')
+def init_db() -> None:
+    """Initializes the SQLite database with the required 'trades' table."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS trades (
+            trade_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            entry_time TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            sl_price REAL NOT NULL,
+            tp_price REAL NOT NULL,
+            position_size REAL NOT NULL,
+            status TEXT NOT NULL, -- 'Open' or 'Closed'
+            exit_time TEXT,
+            exit_price REAL,
+            pnl REAL,
+            highest_price REAL, -- For Trailing Stop calculation
+            lowest_price REAL   -- For Trailing Stop calculation
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-    def get_open_trades(self):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            return [dict(r) for r in conn.execute("SELECT * FROM trades WHERE status = 'Open'")]
+def execute_query(query: str, parameters: tuple = ()) -> None:
+    """Executes an INSERT/UPDATE/DELETE query securely using sqlite3."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(query, parameters)
+    conn.commit()
+    conn.close()
 
-    def get_recent_trades(self, limit=50):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            return [dict(r) for r in conn.execute("SELECT * FROM trades WHERE status = 'Closed' ORDER BY trade_id DESC LIMIT ?", (limit,))]
+def fetch_query(query: str, parameters: tuple = ()) -> List[tuple]:
+    """Fetches data from SQLite and returns a list of tuples."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(query, parameters)
+    results = cursor.fetchall()
+    conn.close()
+    return results
 
-    def close_trade(self, trade_id, exit_price, pnl):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("UPDATE trades SET status = 'Closed', exit_time = ?, exit_price = ?, pnl = ? WHERE trade_id = ?",
-                        (datetime.now().isoformat(), exit_price, pnl, trade_id))
+def fetch_dataframe(query: str, parameters: tuple = ()) -> pd.DataFrame:
+    """Fetches data directly into a Pandas DataFrame for vectorized reporting."""
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query(query, conn, params=parameters)
+    conn.close()
+    return df
 
-paper_db = PaperDB()
+def get_open_trades() -> List[Dict]:
+    """Retrieves all currently 'Open' trades as a list of dictionaries."""
+    query = "SELECT * FROM trades WHERE status = 'Open'"
+    rows = fetch_query(query)
+    columns = [
+        'trade_id', 'ticker', 'direction', 'entry_time', 'entry_price',
+        'sl_price', 'tp_price', 'position_size', 'status', 'exit_time',
+        'exit_price', 'pnl', 'highest_price', 'lowest_price'
+    ]
+    return [dict(zip(columns, row)) for row in rows]
+
+# Initialize on import
+init_db()
