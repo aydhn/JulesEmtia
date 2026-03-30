@@ -1,36 +1,36 @@
-# Phase 25: Corporate Container Architecture
+# Use slim image for minimal footprint
 FROM python:3.10-slim
 
-# Install system dependencies (build-essential for compiling numpy/pandas C extensions)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    wkhtmltopdf \
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+ENV TZ=Europe/Istanbul
+
+# Install dependencies
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        gcc \
+        libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
-WORKDIR /app
+# Create user
+RUN useradd -m quantuser
 
-# Create a non-root user (Best Practice)
-RUN groupadd -r quant && useradd -r -g quant quant
-RUN chown -R quant:quant /app
-
-# Copy requirements and install
+WORKDIR /home/quantuser/app
 COPY requirements.txt .
+
+RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
-# NLTK Vader Lexicon pre-download to save container startup time
-RUN python -c "import nltk; nltk.download('vader_lexicon')"
+# Download NLTK data during build
+RUN python -m nltk.downloader vader_lexicon
 
-# Copy application files
-COPY core/ ./core/
-COPY main.py .
+# Copy application code
+COPY . .
 
-# Permissions
-RUN chown -R quant:quant /app
+# Set permissions
+RUN chown -R quantuser:quantuser /home/quantuser/app
+USER quantuser
 
-# Switch to non-root user
-USER quant
-
-# Run the background loop
 CMD ["python", "main.py"]

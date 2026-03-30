@@ -1,20 +1,15 @@
 [Unit]
-Description=ED Capital Quant Engine Service
-After=network.target docker.service
-Requires=docker.service
+Description=ED Capital Quant Engine Daemon
+After=network.target
 
 [Service]
 Type=simple
 User=root
-# Adjust this path to the absolute path of your project directory
-WorkingDirectory=/path/to/ed_quant_engine
-
-# Start the docker-compose setup
+WorkingDirectory=/opt/ed_quant_engine
 ExecStart=/usr/local/bin/docker-compose up
 ExecStop=/usr/local/bin/docker-compose down
-
 Restart=always
-RestartSec=10
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

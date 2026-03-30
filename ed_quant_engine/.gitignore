@@ -1,38 +1,27 @@
-# Phase 10: Strict Security and Git Configuration
+# Security
+.env
+*.pem
+
+# Data and Logs
+data/
+logs/
+*.sqlite3
+*.db
+*.log
+*.pkl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
 # Environments
-.env
-
-# Virtual Environments
+.venv/
 venv/
 env/
-.venv/
+.env/
 
-# Python Cache
-__pycache__/
-*.py[cod]
-*$py.class
-
-# IDE / Editor
+# IDE
 .vscode/
 .idea/
-*.swp
-
-# Logs
-logs/
-*.log
-
-# Databases & Persisted State
-data/*.sqlite3
-data/*.db
-data/paper_db.sqlite3
-
-# ML Models
-models/*.pkl
-models/*.joblib
-
-# Generated Reports
-reports/
-*.html
-*.pdf
-*.png

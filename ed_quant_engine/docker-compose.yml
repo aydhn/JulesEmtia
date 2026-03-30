@@ -1,19 +1,19 @@
-version: '3.8'
+version: "3.8"
 
 services:
   quant_engine:
     build: .
     container_name: ed_quant_engine
-    restart: unless-stopped
+    restart: always
     environment:
-      - TZ=Europe/Istanbul  # Critical for Financial Timing Sync
-      - LOG_LEVEL=INFO
-    env_file:
-      - .env
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
+      - TZ=Europe/Istanbul
     volumes:
-      # Persistent Storage Volumes (Phase 25 Rules)
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./models:/app/models
-      - ./reports:/app/reports
-    command: python main.py
+      - ./data:/home/quantuser/app/data
+      - ./logs:/home/quantuser/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
