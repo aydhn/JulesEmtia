@@ -1,70 +1,80 @@
 import feedparser
 import nltk
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
-from logger import logger
+from nltk.sentiment import SentimentIntensityAnalyzer
+from typing import Dict, Optional
 
-# Phase 20: NLP Download
+from logger import log
+
+# Download NLTK VADER lexicon if not present
 try:
-    nltk.data.find('sentiment/vader_lexicon')
+    nltk.data.find('sentiment/vader_lexicon.zip')
 except LookupError:
-    nltk.download('vader_lexicon', quiet=True)
+    nltk.download('vader_lexicon')
 
-class SentimentFilter:
-    def __init__(self):
-        self.sia = SentimentIntensityAnalyzer()
-        # Free RSS feeds
-        self.rss_urls = [
-            "https://feeds.finance.yahoo.com/rss/2.0/headline?s=GC=F,SI=F,CL=F,USDTRY=X",
-            "https://www.investing.com/rss/news_285.rss" # Commodities
-        ]
-        self.cache = {}
+sia = SentimentIntensityAnalyzer()
 
-    async def fetch_news(self):
-        try:
-            articles = []
-            for url in self.rss_urls:
-                feed = feedparser.parse(url)
-                for entry in feed.entries[:10]: # Get top 10
-                    articles.append({
-                        'title': entry.title,
-                        'summary': entry.get('summary', '')
-                    })
+# Free RSS feeds related to Commodities and Macro
+RSS_FEEDS = [
+    "https://feeds.a.dj.com/rss/RSSMarketsMain.xml", # WSJ Markets
+    "https://search.cnbc.com/rs/search/combinedcms/view.xml?profile=100003114" # CNBC Finance
+]
 
-            self._analyze_sentiment(articles)
-        except Exception as e:
-            logger.error(f"RSS fetch error: {e}")
+# Simple caching mechanism to avoid slow API fetching on every 1H cycle
+_SENTIMENT_CACHE: Dict[str, float] = {}
 
-    def _analyze_sentiment(self, articles):
-        if not articles: return
+def update_sentiment_cache() -> None:
+    """
+    Parses RSS feeds, calculates VADER compound scores, and caches
+    the aggregated market sentiment (-1.0 to +1.0).
+    """
+    try:
+        total_score = 0.0
+        articles_scored = 0
 
-        scores = []
-        for article in articles:
-            text = f"{article['title']} {article['summary']}"
-            score = self.sia.polarity_scores(text)
-            scores.append(score['compound'])
+        for url in RSS_FEEDS:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:10]: # Check last 10 headlines per feed
+                title = entry.title
+                summary = entry.get('summary', '')
+                text = f"{title} {summary}"
 
-        avg_score = sum(scores) / len(scores) if scores else 0
-        self.cache['global_sentiment'] = avg_score
-        logger.info(f"Global Sentiment Score updated: {avg_score:.2f}")
+                # Filter out irrelevant news using basic keywords
+                keywords = ['gold', 'oil', 'fed', 'inflation', 'rates', 'yield', 'currency', 'dollar']
+                if any(kw in text.lower() for kw in keywords):
+                    score = sia.polarity_scores(text)['compound']
+                    total_score += score
+                    articles_scored += 1
 
-    def veto_signal(self, ticker: str, direction: str) -> bool:
-        '''
-        Phase 20: Sentiment Veto
-        '''
-        if 'global_sentiment' not in self.cache:
-            return False
+        if articles_scored > 0:
+            avg_score = total_score / articles_scored
+            _SENTIMENT_CACHE['macro'] = avg_score
+            log.info(f"Sentiment Cache Updated: {articles_scored} articles, Score: {avg_score:.2f}")
+        else:
+            _SENTIMENT_CACHE['macro'] = 0.0
+            log.info("No relevant articles found for sentiment update.")
 
-        score = self.cache['global_sentiment']
+    except Exception as e:
+        log.error(f"Failed to update RSS sentiment: {e}")
 
-        # If extreme negative news (-0.5), veto Longs
-        if score < -0.5 and direction == "Long":
-            logger.info(f"Sentiment Veto: {direction} {ticker} rejected. Extremely negative news flow ({score:.2f}).")
-            return True
-        # If extreme positive news (+0.5), veto Shorts
-        elif score > 0.5 and direction == "Short":
-            logger.info(f"Sentiment Veto: {direction} {ticker} rejected. Extremely positive news flow ({score:.2f}).")
-            return True
+def get_macro_sentiment() -> float:
+    """Returns the cached sentiment score."""
+    return _SENTIMENT_CACHE.get('macro', 0.0)
 
+def validate_sentiment(ticker: str, signal_direction: str, threshold: float = 0.20) -> bool:
+    """
+    NLP Filter: Rejects trades if the underlying news sentiment strongly contradicts the technical signal.
+    """
+    score = get_macro_sentiment()
+
+    # If the signal is Long, but the news is extremely negative
+    if signal_direction == "Long" and score < -threshold:
+        log.warning(f"Sentiment Veto: {ticker} Technicals are Long, but News is Negative ({score:.2f})")
         return False
 
-sentiment_filter = SentimentFilter()
+    # If the signal is Short, but the news is extremely positive
+    elif signal_direction == "Short" and score > threshold:
+        log.warning(f"Sentiment Veto: {ticker} Technicals are Short, but News is Positive ({score:.2f})")
+        return False
+
+    return True
+

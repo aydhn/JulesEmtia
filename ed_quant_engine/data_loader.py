@@ -1,67 +1,114 @@
 import yfinance as yf
 import pandas as pd
-from logger import logger
+import numpy as np
 import asyncio
+from typing import Dict, Tuple, Optional
+from datetime import datetime
 
-async def fetch_data_with_retry(ticker: str, period: str, interval: str, retries=3) -> pd.DataFrame:
-    for attempt in range(retries):
-        try:
-            # Run blocking I/O in thread
-            df = await asyncio.to_thread(yf.download, ticker, period=period, interval=interval, progress=False)
-            if df.empty:
-                raise ValueError(f"Empty dataframe returned for {ticker}")
-            return df
-        except Exception as e:
-            logger.warning(f"Data fetch error for {ticker} (Attempt {attempt+1}/{retries}): {e}")
-            if attempt < retries - 1:
-                await asyncio.sleep(2 ** attempt)  # Exponential backoff
-            else:
-                logger.error(f"Failed to fetch {interval} data for {ticker} after {retries} attempts.")
-                return pd.DataFrame()
+from logger import log
 
-async def fetch_mtf_data(ticker: str) -> pd.DataFrame:
+# Define the complete trading universe (Commodities and TRY-based Forex).
+# Added majors (Heating Oil = HO=F, Gasoline = RB=F) and CHF/AUD.
+UNIVERSE = {
+    # Precious Metals
+    "Gold": "GC=F", "Silver": "SI=F", "Copper": "HG=F",
+    "Palladium": "PA=F", "Platinum": "PL=F",
+    # Energy
+    "WTI": "CL=F", "Brent": "BZ=F", "NatGas": "NG=F",
+    "HeatingOil": "HO=F", "Gasoline": "RB=F",
+    # Agriculture
+    "Wheat": "ZW=F", "Corn": "ZC=F", "Soybean": "ZS=F",
+    "Coffee": "KC=F", "Cocoa": "CC=F", "Sugar": "SB=F", "Cotton": "CT=F",
+    # Forex (TRY)
+    "USD/TRY": "USDTRY=X", "EUR/TRY": "EURTRY=X", "GBP/TRY": "GBPTRY=X",
+    "JPY/TRY": "JPYTRY=X", "CNH/TRY": "CNHY=X", "CHF/TRY": "CHFTRY=X", "AUD/TRY": "AUDTRY=X"
+}
+
+
+def _download_yf_data(ticker: str, timeframe: str, period: str) -> pd.DataFrame:
+    """Synchronous internal method to fetch and clean yfinance data with forward-fill."""
     try:
-        # Fetch data concurrently
-        df_1d, df_1h = await asyncio.gather(
-            fetch_data_with_retry(ticker, period="2y", interval="1d"),
-            fetch_data_with_retry(ticker, period="1mo", interval="1h")
-        )
+        # Download historical data from Yahoo Finance API.
+        df = yf.download(ticker, period=period, interval=timeframe, auto_adjust=False, progress=False)
 
-        if df_1d.empty or df_1h.empty:
+        # In case of no data
+        if df.empty:
+            log.warning(f"No data returned for {ticker} at {timeframe}")
             return pd.DataFrame()
 
-        # Remove timezone to prevent merge errors
-        df_1d.index = df_1d.index.tz_localize(None)
-        df_1h.index = df_1h.index.tz_localize(None)
+        # Handle Pandas MultiIndex columns (yf.download recent changes)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
 
-        # Flatten multiindex columns if present
-        if isinstance(df_1d.columns, pd.MultiIndex):
-            df_1d.columns = [c[0] for c in df_1d.columns]
-        if isinstance(df_1h.columns, pd.MultiIndex):
-            df_1h.columns = [c[0] for c in df_1h.columns]
+        # Standardize column names
+        df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
 
-        import pandas_ta as ta
-        # PRE-CALCULATE DAILY INDICATORS BEFORE MERGING
-        # This ensures a 50-period EMA means 50 DAYS, not 50 hours!
-        df_1d['EMA_50'] = ta.ema(df_1d['Close'], length=50)
-        macd_1d = ta.macd(df_1d['Close'], fast=12, slow=26, signal=9)
-        if macd_1d is not None and not macd_1d.empty:
-            df_1d['MACD'] = macd_1d.iloc[:, 0]
+        # Professional Forward Fill to handle NaN gaps from weekends/holidays
+        df = df[['open', 'high', 'low', 'close', 'volume']].ffill()
 
-        # Shift the daily data by 1 to completely eliminate Lookahead Bias.
-        # This ensures that for any hour today, we only look at YESTERDAY'S fully closed daily candle.
-        df_1d_shifted = df_1d.shift(1)
+        # Drop any remaining NaNs at the very beginning of the dataset
+        df.dropna(inplace=True)
 
-        # Rename daily columns so they don't clash with hourly columns
-        df_1d_shifted.columns = [f"{c}_1d" for c in df_1d_shifted.columns]
+        return df
 
-        # Merge hourly data with the *previous* day's closed daily data
-        df_merged = pd.merge_asof(df_1h, df_1d_shifted, left_index=True, right_index=True, direction='backward')
-
-        df_merged.ffill(inplace=True)
-        df_merged.dropna(inplace=True)
-
-        return df_merged
     except Exception as e:
-        logger.error(f"MTF data alignment error for {ticker}: {e}")
+        log.error(f"Error fetching data for {ticker} ({timeframe}): {e}")
         return pd.DataFrame()
+
+
+async def fetch_mtf_data(ticker: str, htf_period: str = "2y", ltf_period: str = "60d") -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+    """
+    Asynchronously fetches Multi-Timeframe (MTF) Data using asyncio.to_thread
+    to avoid blocking the main event loop.
+    Returns: Tuple of (HTF DataFrame '1d', LTF DataFrame '1h')
+    """
+    try:
+        # Run yfinance blocking calls in separate threads to avoid blocking asyncio loop
+        htf_df_task = asyncio.to_thread(_download_yf_data, ticker, "1d", htf_period)
+        ltf_df_task = asyncio.to_thread(_download_yf_data, ticker, "1h", ltf_period)
+
+        htf_df, ltf_df = await asyncio.gather(htf_df_task, ltf_df_task)
+
+        if htf_df.empty or ltf_df.empty:
+            log.warning(f"Empty MTF data retrieved for {ticker}.")
+            return None, None
+
+        # Clean timezones to prevent merge_asof issues
+        htf_df.index = htf_df.index.tz_localize(None)
+        ltf_df.index = ltf_df.index.tz_localize(None)
+
+        return htf_df, ltf_df
+
+    except Exception as e:
+        log.error(f"Async MTF Data Fetch Failed for {ticker}: {e}")
+        return None, None
+
+
+def align_mtf_data(htf_df: pd.DataFrame, ltf_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aligns Daily (HTF) data onto Hourly (LTF) data with strict lookahead bias prevention.
+    The Daily data must be shifted by 1 BEFORE merging so that the 1H candle only sees
+    the completed daily data of yesterday.
+    """
+    if htf_df is None or ltf_df is None or htf_df.empty or ltf_df.empty:
+        return pd.DataFrame()
+
+    # Create explicit copy and append '_htf' suffix to prevent column overlap
+    htf_copy = htf_df.copy()
+    htf_copy.columns = [f"{col}_htf" for col in htf_copy.columns]
+
+    # STRCIT LOOKAHEAD BIAS PREVENTION
+    # Shift HTF data forward by 1 day. This guarantees that at any point today,
+    # the HTF feature values only reflect yesterday's closed daily candle.
+    htf_shifted = htf_copy.shift(1).dropna()
+
+    # Merge asof (backward) ensures that each 1H timestamp gets the most recent valid HTF value.
+    merged_df = pd.merge_asof(
+        ltf_df.sort_index(),
+        htf_shifted.sort_index(),
+        left_index=True,
+        right_index=True,
+        direction="backward"
+    )
+
+    return merged_df.dropna()

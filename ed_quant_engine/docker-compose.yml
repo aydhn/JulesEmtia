@@ -1,24 +1,22 @@
-version: "3.8"
+version: '3.8'
 
 services:
   quant_engine:
     build: .
     container_name: ed_quant_engine
-    restart: unless-stopped
-    env_file:
-      - .env
+    restart: always # Otonom kurtarma / Recovery
     environment:
-      - TZ=Europe/Istanbul  # Senkronizasyon için kritik
+      - TZ=Europe/Istanbul # Kritik zaman dilimi senkronizasyonu
+    env_file:
+      - .env # Telegram tokenleri ve gizli veriler
     volumes:
-      - ./data:/app/data        # Veritabanı korunur
-      - ./logs:/app/logs        # Loglar takip edilebilir
-      - ./models:/app/models    # ML Model ve Optimizasyonlar
-      - ./reports:/app/reports  # Rapor Çıktıları
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 2G
-        reservations:
-          cpus: '0.2'
-          memory: 512M
+      # Veritabanı ve modeller kalıcı olmalı (Host makineye bağlanmalı)
+      - ./paper_db.sqlite3:/app/paper_db.sqlite3
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

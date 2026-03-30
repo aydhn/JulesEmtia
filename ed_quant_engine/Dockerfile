@@ -1,31 +1,40 @@
+# Base image: Use a slim version of Python to keep the container lightweight
 FROM python:3.10-slim
 
-# Install necessary system dependencies for math/compilation
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Set environment variables for non-interactive installations and timezone sync
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ="Europe/Istanbul"
+
+# Install build dependencies for compiling certain Python packages (like pandas, scipy)
+# and for generating PDFs (weasyprint) if needed.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
     build-essential \
-    wkhtmltopdf \
+    curl \
+    libcairo2 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libgdk-pixbuf2.0-0 \
+    libffi-dev \
+    shared-mime-info \
     && rm -rf /var/lib/apt/lists/*
 
-# Create app directory and non-root user
+# Set the working directory inside the container
 WORKDIR /app
-RUN useradd -m quantuser && chown quantuser:quantuser /app
 
-# Switch to non-root user
-USER quantuser
-
-# Copy requirements and install
-COPY --chown=quantuser:quantuser requirements.txt .
+# Copy the requirements file and install Python dependencies
+COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download NLTK data (VADER lexicon)
-RUN python -c "import nltk; nltk.download('vader_lexicon')"
+# Download NLTK VADER lexicon during build to avoid downloading on every startup
+RUN python -m nltk.downloader vader_lexicon
 
-# Copy the rest of the application
-COPY --chown=quantuser:quantuser src/ src/
-COPY --chown=quantuser:quantuser main.py .
+# Copy the rest of the application code
+COPY . /app/
 
-# Create necessary directories for runtime
-RUN mkdir -p data logs models reports
+# Run as a non-root user for security (Best Practice)
+RUN useradd -m quantuser && chown -R quantuser:quantuser /app
+USER quantuser
 
-# Entrypoint
+# The command to start the bot
 CMD ["python", "main.py"]

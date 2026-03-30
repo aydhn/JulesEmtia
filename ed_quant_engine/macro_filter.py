@@ -1,114 +1,117 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from logger import logger
-import asyncio
+from typing import Optional
 
-class MacroFilter:
-    def __init__(self):
-        self.dxy_ticker = "DX-Y.NYB"
-        self.tnx_ticker = "^TNX"
-        self.vix_ticker = "^VIX"
-        self.cache = {}
+from logger import log
 
-    async def fetch_macro_data(self):
-        try:
-            dxy, tnx = await asyncio.gather(
-                asyncio.to_thread(yf.download, self.dxy_ticker, period="1mo", interval="1d", progress=False),
-                asyncio.to_thread(yf.download, self.tnx_ticker, period="1mo", interval="1d", progress=False)
-            )
+def fetch_macro_data() -> pd.DataFrame:
+    """
+    Fetches daily macroeconomic indicators (DXY & US10Y).
+    These act as a global regime filter (Risk-On / Risk-Off).
+    """
+    try:
+        # DX-Y.NYB = US Dollar Index, ^TNX = US 10-Year Treasury Yield
+        tickers = ["DX-Y.NYB", "^TNX"]
+        df = yf.download(tickers, period="1y", interval="1d", progress=False)["Close"]
 
-            if not dxy.empty and not tnx.empty:
-                # Forward fill NaNs
-                self.cache['dxy_close'] = dxy['Close'].ffill().iloc[-1].item()
-                self.cache['dxy_sma50'] = dxy['Close'].rolling(50).mean().iloc[-1].item() if len(dxy) >= 50 else self.cache['dxy_close']
-                self.cache['tnx_close'] = tnx['Close'].ffill().iloc[-1].item()
-                self.cache['tnx_sma50'] = tnx['Close'].rolling(50).mean().iloc[-1].item() if len(tnx) >= 50 else self.cache['tnx_close']
+        # Clean up column names in case of MultiIndex
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
 
-            logger.info("Macro data updated successfully.")
-        except Exception as e:
-            logger.error(f"Error fetching macro data: {e}")
+        df.rename(columns={"DX-Y.NYB": "DXY", "^TNX": "US10Y"}, inplace=True)
 
-    def get_regime(self) -> str:
-        '''
-        Phase 6: Market Regime Filter
-        '''
-        if not self.cache:
-            return "Neutral"
+        # Forward fill weekends/holidays
+        df = df.ffill().dropna()
 
-        dxy = self.cache.get('dxy_close', 0)
-        dxy_sma = self.cache.get('dxy_sma50', 0)
-        tnx = self.cache.get('tnx_close', 0)
-        tnx_sma = self.cache.get('tnx_sma50', 0)
+        # Calculate 50-day SMA for trend determination
+        df["DXY_SMA50"] = df["DXY"].rolling(window=50).mean()
+        df["US10Y_SMA50"] = df["US10Y"].rolling(window=50).mean()
 
-        # Risk-Off / Tightening Regime: Strong DXY and rising yields
-        if dxy > dxy_sma and tnx > tnx_sma:
-            return "Risk-Off"
-        # Risk-On / Loosening Regime: Weak DXY and falling yields
-        elif dxy < dxy_sma and tnx < tnx_sma:
-            return "Risk-On"
+        return df.dropna()
 
+    except Exception as e:
+        log.error(f"Failed to fetch macro data: {e}")
+        return pd.DataFrame()
+
+
+def get_market_regime() -> str:
+    """
+    Determines the current market regime based on DXY and US10Y trends.
+    Risk-Off = Tightening (Strong USD, Rising Yields) -> Avoid Long Commodities/EM FX
+    Risk-On = Loosening (Weak USD, Falling Yields)
+    """
+    df = fetch_macro_data()
+    if df.empty:
+        log.warning("Macro data empty. Defaulting to 'Neutral' regime.")
         return "Neutral"
 
-    def veto_signal(self, ticker: str, direction: str) -> bool:
-        '''
-        Returns True if the signal should be vetoed based on macro regime.
-        '''
-        regime = self.get_regime()
+    last_row = df.iloc[-1]
 
-        metals = ["GC=F", "SI=F", "HG=F", "PA=F", "PL=F"]
-        em_fx = ["USDTRY=X", "EURTRY=X"] # Long EM means short USD effectively if trading TRY base
+    # If DXY and Yields are both above their 50-day SMA, it's a strong Risk-Off environment.
+    if last_row["DXY"] > last_row["DXY_SMA50"] and last_row["US10Y"] > last_row["US10Y_SMA50"]:
+        return "Risk-Off"
 
-        # Phase 6: Counter-trend macro veto
-        if regime == "Risk-Off":
-             # Strong Dollar/Yields is bad for Gold/Silver longs
-             if ticker in metals and direction == "Long":
-                 logger.info(f"Macro Veto: {direction} {ticker} rejected due to Risk-Off regime (Strong DXY/TNX).")
-                 return True
+    # If both are below, it's Risk-On.
+    elif last_row["DXY"] < last_row["DXY_SMA50"] and last_row["US10Y"] < last_row["US10Y_SMA50"]:
+        return "Risk-On"
+
+    return "Neutral"
+
+
+def is_black_swan_vix(threshold: float = 35.0) -> bool:
+    """
+    Monitors S&P 500 VIX (^VIX) for Black Swan / Extreme Panic events.
+    If VIX is above threshold, NO new long trades are allowed.
+    """
+    try:
+        df = yf.download("^VIX", period="5d", interval="1d", progress=False)["Close"]
+        if df.empty:
+            return False
+
+        last_vix = df.iloc[-1].item() if isinstance(df.iloc[-1], pd.Series) else df.iloc[-1]
+
+        if last_vix > threshold:
+            log.critical(f"🚨 VIX CIRCUIT BREAKER ACTIVATED: {last_vix:.2f} > {threshold}")
+            return True
 
         return False
 
-    async def check_vix_circuit_breaker(self, threshold=35.0) -> bool:
-        '''
-        Phase 19: Black Swan / VIX Circuit Breaker
-        '''
-        try:
-            vix = await asyncio.to_thread(yf.download, self.vix_ticker, period="5d", interval="1d", progress=False)
-            if vix.empty: return False
+    except Exception as e:
+        log.error(f"VIX Check failed: {e}")
+        return False
 
-            last_vix = vix['Close'].iloc[-1].item()
-            prev_vix = vix['Close'].iloc[-2].item() if len(vix) > 1 else last_vix
 
-            # Absolute threshold or sudden >25% spike
-            if last_vix > threshold or (last_vix > prev_vix * 1.25):
-                logger.critical(f"BLACK SWAN: VIX at {last_vix:.2f}. Circuit Breaker Triggered!")
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"VIX check error: {e}")
-            return False
+def is_flash_crash(df: pd.DataFrame, ticker: str, window: int = 50, z_threshold: float = 4.0) -> bool:
+    """
+    Micro Flash Crash detector using Z-Score Anomaly Detection on the LTF dataframe.
+    Calculates if the current price is anomalously far from its moving average.
+    """
+    if len(df) < window:
+        return False
 
-    def check_zscore_anomaly(self, df: pd.DataFrame, threshold=4.0) -> bool:
-        '''
-        Phase 19: Micro Flash Crash Detector
-        '''
-        if df.empty or len(df) < 20: return False
-        try:
-            prices = df['Close']
-            mean = prices.rolling(20).mean().iloc[-1]
-            std = prices.rolling(20).std().iloc[-1]
+    try:
+        # Calculate Rolling Mean and Standard Deviation
+        rolling_mean = df['close'].rolling(window=window).mean()
+        rolling_std = df['close'].rolling(window=window).std()
 
-            if std == 0: return False
+        # Calculate Z-Score of the most recent closed candle
+        current_price = df['close'].iloc[-1]
+        mean_val = rolling_mean.iloc[-1]
+        std_val = rolling_std.iloc[-1]
 
-            current_price = prices.iloc[-1]
-            z_score = abs((current_price - mean) / std)
-
-            if z_score > threshold:
-                logger.critical(f"FLASH CRASH ANOMALY: Z-Score {z_score:.2f} exceeds threshold {threshold}.")
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Z-Score anomaly check error: {e}")
+        if pd.isna(mean_val) or pd.isna(std_val) or std_val == 0:
             return False
 
-macro_filter = MacroFilter()
+        z_score = abs((current_price - mean_val) / std_val)
+
+        if z_score > z_threshold:
+            log.critical(f"🚨 FLASH CRASH ANOMALY on {ticker}: Z-Score {z_score:.2f} > {z_threshold}")
+            return True
+
+        return False
+
+    except Exception as e:
+        log.error(f"Flash crash detection failed for {ticker}: {e}")
+        return False
+
