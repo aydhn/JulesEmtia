@@ -1,11 +1,21 @@
-.env
+# Python
 __pycache__/
 *.pyc
-*.sqlite3
-*.db
-*.log
-*.pkl
-logs/
-models/
-db/
+*.pyo
+*.pyd
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# VS Code
 .vscode/
+
+# Project specifics
+paper_db.sqlite3
+logs/
+*.log
+rf_model.pkl

@@ -3,23 +3,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "dummy_token")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "dummy_id")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", 0))
 
-# Phase 1: Ticker Universe
+# ED Capital Kurumsal İşlem Evreni
 TICKERS = {
-    "Metals": ["GC=F", "SI=F", "HG=F", "PA=F", "PL=F"],
-    "Energy": ["CL=F", "BZ=F", "NG=F"],
-    "Agri": ["ZW=F", "ZC=F", "ZS=F", "KC=F", "CC=F", "SB=F", "CT=F"],
-    "Forex": ["USDTRY=X", "EURTRY=X", "GBPTRY=X", "JPYTRY=X", "CNH=F"]
+    "METALS": ["GC=F", "SI=F", "HG=F", "PA=F", "PL=F"],
+    "ENERGY": ["CL=F", "BZ=F", "NG=F", "HO=F", "RB=F"],
+    "AGRI":   ["ZW=F", "ZC=F", "ZS=F", "KC=F", "CC=F", "SB=F", "CT=F"],
+    "FOREX":  ["USDTRY=X", "EURTRY=X", "GBPTRY=X", "JPYTRY=X", "CNYTRY=X", "CHFTRY=X"]
 }
-FLAT_TICKERS = [tick for sublist in TICKERS.values() for tick in sublist]
 
-# JP Morgan Risk Parameters
-MAX_GLOBAL_EXPOSURE = 0.06
-MAX_OPEN_POSITIONS = 4
-MAX_RISK_PER_TRADE = 0.02
-KELLY_FRACTION = 0.5
-CORRELATION_THRESHOLD = 0.75
-VIX_BLACK_SWAN_THRESHOLD = 30.0
-Z_SCORE_ANOMALY = 4.0
+# Spread ve Makas Simülasyonu (Phase 21)
+SPREADS = {"METALS": 0.0002, "ENERGY": 0.0003, "AGRI": 0.0005, "FOREX": 0.0010}
+
+INITIAL_CAPITAL = 10000.0
+MAX_RISK_PER_TRADE = 0.04 # Hard Cap %4
+GLOBAL_EXPOSURE_LIMIT = 4 # Maks. açık pozisyon
