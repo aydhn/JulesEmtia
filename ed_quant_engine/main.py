@@ -1,165 +1,172 @@
-import asyncio
+import schedule
+import time
+import pandas as pd
 import gc
-from config import INITIAL_CAPITAL, UNIVERSE, TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID, VIX_PANIC_THRESHOLD, SENTIMENT_VETO_THRESHOLD
-from core.paper_db import PaperDB
-from core.notifier import TelegramManager
+from core.config import FLAT_TICKERS, VIX_BLACK_SWAN_THRESHOLD, Z_SCORE_ANOMALY
 from core.logger import get_logger
-from data.data_loader import DataLoader
-from data.macro_filter import MacroFilter
-from data.sentiment_filter import SentimentFilter
-from strategy.ml_validator import MLValidator
-from strategy.strategy import StrategyEngine
-from execution.broker import PaperBroker
-from execution.portfolio_manager import PortfolioManager
-from execution.execution_model import ExecutionSimulator
-from analysis.reporter import ReportEngine
+from core.telegram_notifier import send_message
+from data.loader import fetch_data
+from data.features import add_features
+from data.macro import get_vix, get_dxy_trend
+from data.nlp import get_news_sentiment
+from strategy.logic import generate_signals
+from strategy.ml_validator import validate_signal, train_model
+from strategy.execution import execute_cost_model
+from trading.portfolio import calculate_correlation, check_correlation_veto, calculate_kelly_size
+from trading.trade_manager import check_open_positions
+from db.paper_broker import PaperBroker
 
-logger = get_logger()
+log = get_logger()
+broker = PaperBroker()
 
-class QuantOrchestrator:
-    def __init__(self):
-        self.db = PaperDB()
-        self.broker = PaperBroker(self.db)
-        self.data_engine = DataLoader()
-        self.macro_engine = MacroFilter()
-        self.sentiment_engine = SentimentFilter()
-        self.risk_manager = PortfolioManager(self.db)
-        self.execution_simulator = ExecutionSimulator()
-        self.trading_sys = StrategyEngine(self.broker)
-        self.reporter = ReportEngine(self.db)
-        self.ml_validator = MLValidator()
-        self.telegram = TelegramManager(TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID, self)
+# State management
+app_state = {'paused': False}
 
-        self.capital = INITIAL_CAPITAL
-        self.open_positions = []
-        self.is_paused = False
-        self.universe_cache = {}
-        self.recover_state()
+def run_live_cycle():
+    if app_state['paused']:
+        log.info("System is Paused. Skipping scan.")
+        return
 
-    def recover_state(self):
-        self.open_positions = self.db.fetch_all("SELECT * FROM trades WHERE status = 'Open'")
-        closed_pnl_tuple = self.db.fetch_all("SELECT SUM(pnl) FROM trades WHERE status = 'Closed'")
-        closed_pnl = closed_pnl_tuple[0][0] if closed_pnl_tuple and closed_pnl_tuple[0][0] else 0
+    log.info("Starting Live Cycle Scan...")
 
-        self.capital = INITIAL_CAPITAL + closed_pnl
-        logger.info(f"State Recovery: {len(self.open_positions)} adet açık işlem geri yüklendi. Güncel Kasa: ${self.capital:.2f}")
+    # 1. Macro & Black Swan checks
+    vix = get_vix()
+    dxy_trend = get_dxy_trend()
+    log.info(f"VIX: {vix:.2f} | DXY Trend: {dxy_trend}")
 
-    async def panic_close_all(self):
-        logger.critical("🚨 ACİL DURUM: Tüm pozisyonlar piyasa fiyatından kapatılıyor!")
-        for trade in self.open_positions:
-            t_id, ticker = trade[0], trade[1]
-            try:
-                # MTF async pipeline fetches
-                df = self.data_engine.fetch_mtf_data(ticker)
-                curr_price = df['Close'].iloc[-1]
-                self.broker.close_order(t_id, curr_price)
-            except Exception as e:
-                logger.error(f"Panic close failure: {e}")
-        self.recover_state()
+    black_swan_active = False
+    if vix > VIX_BLACK_SWAN_THRESHOLD:
+        log.warning("VIX Black Swan Active! Halting new long positions.")
+        send_message(f"🚨 KRİTİK UYARI: VIX Devre Kesici Tetiklendi ({vix:.2f})! Sistem Savunma Moduna Geçti.")
+        black_swan_active = True
 
-    async def run_live_cycle(self):
-        if self.is_paused: return
+    # 2. Fetch Data & Features
+    dfs_htf = {}
+    dfs_ltf = {}
+    current_prices = {}
+    current_atrs = {}
 
-        logger.info("🟢 Canlı Tarama Döngüsü Başladı...")
-        macro = self.macro_engine.get_macro_regime()
+    for ticker in FLAT_TICKERS:
+        df_1d = fetch_data(ticker, '1d', '2y')
+        df_1h = fetch_data(ticker, '1h', '60d')
 
-        # Circuit Breakers
-        if macro['Black_Swan'] or macro['VIX'] > VIX_PANIC_THRESHOLD:
-            await self.telegram.send_message(f"🚨 KRİTİK UYARI: VIX Devre Kesici Tetiklendi ({macro['VIX']:.2f})! Sistem Savunma Moduna Geçti.")
-            await self.panic_close_all()
-            return
+        if df_1d.empty or df_1h.empty:
+            continue
 
-        current_prices = {}
-        atrs = {}
+        df_1d = add_features(df_1d)
+        df_1h = add_features(df_1h)
 
-        # 1. Fetch live data
-        for category, tickers in UNIVERSE.items():
-            for ticker in tickers:
-                df = self.data_engine.fetch_mtf_data(ticker)
-                if df is None or df.empty: continue
+        dfs_htf[ticker] = df_1d
+        dfs_ltf[ticker] = df_1h
 
-                self.universe_cache[ticker] = df
-                current_prices[ticker] = df['Close'].iloc[-1]
-                atrs[ticker] = df['ATR'].iloc[-1]
+        current_prices[ticker] = df_1h['Close'].iloc[-1]
+        current_atrs[ticker] = df_1h['ATR_14'].iloc[-1]
 
-        # 2. Manage existing trailing stops and close hit trades
-        self.trading_sys.manage_trailing_stops(self.open_positions, current_prices, atrs)
-        self.recover_state()
+    # 3. Manage Open Positions
+    check_open_positions(broker, current_prices, current_atrs)
 
-        # 3. Hunt for new signals
-        for category, tickers in UNIVERSE.items():
-            for ticker in tickers:
-                df = self.universe_cache.get(ticker)
-                if df is None: continue
+    if black_swan_active:
+        return # Skip finding new signals
 
-                signal = self.trading_sys.generate_signal(df)
-                if signal != "Hold":
+    # 4. Correlation Matrix
+    corr_matrix = calculate_correlation(dfs_1h) if 'dfs_1h' in locals() else calculate_correlation(dfs_ltf)
 
-                    # 4. ML Validation Veto
-                    features = [df['RSI'].iloc[-2], df['Z_Score'].iloc[-2], df['ATR'].iloc[-2]]
-                    if self.ml_validator.ml_veto(features):
-                        logger.info(f"{ticker} Sinyali ML Vetosu Yedi.")
-                        continue
+    # 5. Signal Generation & Validation
+    for ticker, df in dfs_ltf.items():
+        signals_df = generate_signals(df)
+        latest_signal = signals_df['Signal'].iloc[-1]
 
-                    # 5. NLP Sentiment Veto
-                    sentiment = self.sentiment_engine.get_news_sentiment("economy")
-                    if (sentiment < SENTIMENT_VETO_THRESHOLD and signal == "Long") or (sentiment > abs(SENTIMENT_VETO_THRESHOLD) and signal == "Short"):
-                        logger.info(f"{ticker} Sinyali NLP Haber Vetosu Yedi.")
-                        continue
+        if latest_signal == 0:
+            continue
 
-                    # 6. Correlation / Risk limit Veto
-                    if self.risk_manager.check_correlation_veto(ticker, signal, self.universe_cache):
-                        continue
+        direction = 'Long' if latest_signal == 1 else 'Short'
 
-                    # 7. Execution Cost Model and Sizing via Kelly
-                    price = current_prices[ticker]
-                    atr = atrs[ticker]
-                    exec_price, cost = self.execution_simulator.get_execution_price_and_cost(category, price, atr, signal)
+        # MTF Veto (Daily trend must align)
+        if ticker in dfs_htf:
+            daily_ema = dfs_htf[ticker]['EMA_50'].iloc[-1]
+            daily_close = dfs_htf[ticker]['Close'].iloc[-1]
+            if direction == 'Long' and daily_close < daily_ema:
+                log.info(f"MTF Veto for {ticker}: Daily trend is down.")
+                continue
+            elif direction == 'Short' and daily_close > daily_ema:
+                log.info(f"MTF Veto for {ticker}: Daily trend is up.")
+                continue
 
-                    sl = exec_price - (1.5 * atr) if signal == "Long" else exec_price + (1.5 * atr)
-                    tp = exec_price + (3.0 * atr) if signal == "Long" else exec_price - (3.0 * atr)
+        # ML Validator
+        prob = validate_signal(signals_df)
+        if prob < 0.60:
+            log.info(f"ML Veto for {ticker}: Low Probability ({prob:.2f})")
+            continue
 
-                    size = self.risk_manager.calculate_kelly_position(self.capital, exec_price, sl)
+        # NLP Sentiment Veto
+        sentiment = get_news_sentiment(ticker.split('=')[0])
+        if direction == 'Long' and sentiment < -0.5:
+            log.info(f"Sentiment Veto for {ticker}: Negative News ({sentiment:.2f})")
+            continue
 
-                    # 8. Fire order
-                    if size > 0:
-                        self.broker.place_order(ticker, signal, size, exec_price, sl, tp, cost)
-                        msg = f"🚀 YENİ İŞLEM: {ticker} {signal}\nFiyat: {exec_price:.4f}\nSL: {sl:.4f} | TP: {tp:.4f}\nLot: {size:.2f}"
-                        await self.telegram.send_message(msg)
-                        self.recover_state()
+        # Correlation Veto
+        open_pos = broker.get_open_positions()
+        if check_correlation_veto(ticker, direction, open_pos, corr_matrix):
+            continue
 
-        self.universe_cache.clear()
-        gc.collect() # Aggressive Memory Management
+        # 6. Execution & Position Sizing
+        balance = broker.get_account_balance()
+        atr = current_atrs[ticker]
+        entry_price = current_prices[ticker]
 
-async def scheduler_loop(orchestrator):
-    while True:
-        try:
-            # Run loop
-            await orchestrator.run_live_cycle()
-            # Then sleep for exactly one hour to align with MTF candle closures
-            await asyncio.sleep(3600)
-        except Exception as e:
-            logger.error(f"Scheduler Hatası: {e}")
-            await asyncio.sleep(60)
+        # Calculate Kelly Size (assuming 50% win rate for first trades)
+        lot_size = calculate_kelly_size(balance, atr, entry_price, 0.55, 2.0, -1.0)
 
-async def main():
-    orchestrator = QuantOrchestrator()
-    msg = f"🚀 ED Capital Quant Engine Canlı Paper Trade Modunda Başlatıldı.\nKasa: ${orchestrator.capital:.2f}\nVIX Seviyesi: İzleniyor."
+        if lot_size <= 0:
+            continue
 
-    if orchestrator.telegram.app:
-        await orchestrator.telegram.app.initialize()
-        await orchestrator.telegram.app.start()
-        await orchestrator.telegram.app.updater.start_polling()
-        await orchestrator.telegram.send_message(msg)
-    else:
-        logger.info(msg)
+        # Apply Slippage and Spread
+        adj_entry, cost = execute_cost_model(ticker, entry_price, atr, atr, direction)
 
-    # Start loop in background async task to allow telegram polling concurrently
-    asyncio.create_task(scheduler_loop(orchestrator))
+        if direction == 'Long':
+            sl = adj_entry - (1.5 * atr)
+            tp = adj_entry + (3.0 * atr)
+        else:
+            sl = adj_entry + (1.5 * atr)
+            tp = adj_entry - (3.0 * atr)
 
-    # Keep alive
-    while True:
-        await asyncio.sleep(3600)
+        broker.place_market_order(ticker, direction, lot_size, adj_entry, sl, tp, cost)
+
+        send_message(f"🚨 YENİ SİNYAL: {ticker} {direction}\nGiriş: {adj_entry:.4f}\nSL: {sl:.4f}\nTP: {tp:.4f}\nLot: {lot_size:.4f}")
+
+    # Memory cleanup
+    del dfs_htf
+    del dfs_ltf
+    gc.collect()
+
+def telegram_polling():
+    # Setup simple telebot polling in background thread if needed
+    # For now we mock the handling of commands via simple loops or webhooks
+    pass
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    log.info("🚀 ED Capital Quant Engine Canlı Paper Trade Modunda Başlatıldı.")
+    send_message("🚀 ED Capital Quant Engine Canlı Paper Trade Modunda Başlatıldı.")
+
+    # Train initial ML Model
+    try:
+        df_train = fetch_data('GC=F', '1d', '5y')
+        df_train = add_features(df_train)
+        train_model(df_train)
+    except Exception as e:
+        log.error(f"Initial ML training failed: {e}")
+
+    schedule.every().hour.at(":00").do(run_live_cycle)
+
+    # Daily Heartbeat
+    schedule.every().day.at("08:00").do(lambda: send_message("🟢 Sistem Aktif: Son 24 saat döngüsü tamamlandı. Kasa: $" + str(broker.get_account_balance())))
+
+    try:
+        while True:
+            schedule.run_pending()
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+        log.info("System Shutting Down...")
+        send_message("Sistem kapatıldı.")
+

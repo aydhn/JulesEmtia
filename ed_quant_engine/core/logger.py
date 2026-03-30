@@ -1,28 +1,25 @@
 import logging
-import os
 from logging.handlers import RotatingFileHandler
+import os
 
-def get_logger() -> logging.Logger:
-    """Sets up and returns a professional logger with RotatingFileHandler."""
-    log_dir = "logs"
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
+os.makedirs('logs', exist_ok=True)
 
-    log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+logger = logging.getLogger("QuantEngine")
+logger.setLevel(logging.DEBUG)
 
-    log_file = os.path.join(log_dir, 'quant_engine.log')
-    file_handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3) # 5MB limit
-    file_handler.setFormatter(log_formatter)
+# Rotating file handler (Max 5MB, 3 backups)
+fh = RotatingFileHandler("logs/quant_engine.log", maxBytes=5*1024*1024, backupCount=3)
+fh.setLevel(logging.DEBUG)
 
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(log_formatter)
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
 
-    logger = logging.getLogger("ED_Quant_Engine")
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+fh.setFormatter(formatter)
+ch.setFormatter(formatter)
 
-    # Singleton pattern to prevent duplicate logs
-    if not logger.hasHandlers():
-        logger.setLevel(logging.INFO)
-        logger.addHandler(file_handler)
-        logger.addHandler(console_handler)
+logger.addHandler(fh)
+logger.addHandler(ch)
 
+def get_logger():
     return logger

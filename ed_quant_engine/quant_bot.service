@@ -1,18 +1,13 @@
 [Unit]
-Description=ED Capital Quant Engine Service
-After=network.target docker.service
+Description=ED Capital Quant Engine (Docker Compose Service)
 Requires=docker.service
+After=docker.service
 
 [Service]
-Type=simple
-WorkingDirectory=/root/ed_quant_engine
+Restart=always
+WorkingDirectory=/opt/ed_quant_engine
 ExecStart=/usr/local/bin/docker-compose up
 ExecStop=/usr/local/bin/docker-compose down
-Restart=always
-RestartSec=10
-StandardOutput=syslog
-StandardError=syslog
-SyslogIdentifier=ed_quant_engine
 
 [Install]
 WantedBy=multi-user.target
