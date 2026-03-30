@@ -5,7 +5,7 @@ import sys
 
 # Konfigürasyonu buradan alıyoruz (dosya yolları vs)
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from config import LOG_DIR
+from src.config import LOG_DIR
 
 # Log dizinini oluştur
 os.makedirs(LOG_DIR, exist_ok=True)
