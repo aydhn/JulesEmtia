@@ -4,59 +4,72 @@ import pandas_ta as ta
 import numpy as np
 import time
 from core.logger import get_logger
-logger = get_logger()
+from strategy.features import FeaturesEngine
 
-def exponential_backoff(func):
-    def wrapper(*args, **kwargs):
-        retries = 3
-        delay = 2
-        for i in range(retries):
-            try:
-                return func(*args, **kwargs)
-            except Exception as e:
-                logger.warning(f"Veri çekme hatası (Deneme {i+1}/{retries}): {e}")
-                if i == retries - 1:
-                    logger.error("API Limit Aşıldı veya Bağlantı Koptu.")
-                    return None
-                time.sleep(delay)
-                delay *= 2
-    return wrapper
+logger = get_logger()
 
 class DataLoader:
     def __init__(self):
-        pass
+        self.feature_engine = FeaturesEngine()
 
-    @exponential_backoff
+    def fetch_ohlcv(self, ticker: str, interval: str = "1h", period: str = "60d") -> pd.DataFrame:
+        """Fetch OHLCV Data with Exponential Backoff."""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                df = yf.download(ticker, interval=interval, period=period, progress=False)
+                if df.empty:
+                    logger.warning(f"{ticker} verisi boş geldi, tekrar deneniyor ({attempt + 1}).")
+                    time.sleep(2 ** attempt)
+                    continue
+
+                # Ensure single level columns
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.droplevel(1)
+
+                df.ffill(inplace=True)
+                df.bfill(inplace=True)
+                return df
+
+            except Exception as e:
+                logger.error(f"Error fetching data for {ticker}: {e}")
+                time.sleep(2 ** attempt)
+
+        logger.critical(f"{ticker} verisi 3 denemede de alınamadı.")
+        return pd.DataFrame()
+
     def fetch_mtf_data(self, ticker: str) -> pd.DataFrame:
-        htf = yf.download(ticker, interval="1d", period="2y", progress=False)
-        ltf = yf.download(ticker, interval="1h", period="1mo", progress=False)
+        """
+        Fetches Daily (HTF) and Hourly (LTF) data, aligns them with ZERO Lookahead Bias.
+        Returns the aligned hourly DataFrame enriched with indicators.
+        """
+        df_ltf = self.fetch_ohlcv(ticker, interval="1h", period="60d")
+        df_htf = self.fetch_ohlcv(ticker, interval="1d", period="6mo")
 
-        if htf.empty or ltf.empty: return None
+        if df_ltf.empty or df_htf.empty:
+            return pd.DataFrame()
 
-        htf['EMA_50'] = ta.ema(htf['Close'], length=50)
-        macd = ta.macd(htf['Close'])
-        htf['MACD'] = macd.iloc[:, 0] if macd is not None else 0
-        htf['HTF_Trend'] = np.where((htf['Close'] > htf['EMA_50']) & (htf['MACD'] > 0), 1,
-                           np.where((htf['Close'] < htf['EMA_50']) & (htf['MACD'] < 0), -1, 0))
+        # Calculate indicators for both timeframes
+        df_htf = self.feature_engine.add_features(df_htf, is_htf=True)
+        df_ltf = self.feature_engine.add_features(df_ltf, is_htf=False)
 
-        htf_shifted = htf[['HTF_Trend', 'EMA_50']].shift(1).dropna()
+        # Lookahead Bias Protection: Shift HTF data before merging!
+        # This ensures hourly data ONLY sees YESTERDAY'S completely closed daily bar.
+        df_htf_shifted = df_htf.shift(1).copy()
+        df_htf_shifted = df_htf_shifted.add_prefix('HTF_')
+        df_htf_shifted.index = pd.to_datetime(df_htf_shifted.index).tz_localize(None)
 
-        ltf['RSI'] = ta.rsi(ltf['Close'], length=14)
-        ltf['ATR'] = ta.atr(ltf['High'], ltf['Low'], ltf['Close'], length=14)
-        ltf['Returns'] = ltf['Close'].pct_change()
+        df_ltf.index = pd.to_datetime(df_ltf.index).tz_localize(None)
 
-        # Z-Score Flaş çöküş
-        ltf['Z_Score'] = (ltf['Close'] - ltf['Close'].rolling(50).mean()) / ltf['Close'].rolling(50).std()
+        # Merge using merge_asof (backward match) to avoid future leaks
+        df_combined = pd.merge_asof(
+            df_ltf.sort_index(),
+            df_htf_shifted.sort_index(),
+            left_index=True,
+            right_index=True,
+            direction='backward'
+        )
 
-        ltf = ltf.reset_index()
-        htf_shifted = htf_shifted.reset_index()
+        df_combined.dropna(inplace=True)
+        return df_combined
 
-        if ltf['Datetime'].dt.tz is not None:
-            ltf['Datetime'] = ltf['Datetime'].dt.tz_localize(None)
-        if htf_shifted['Date'].dt.tz is not None:
-            htf_shifted['Date'] = htf_shifted['Date'].dt.tz_localize(None)
-
-        htf_shifted = htf_shifted.rename(columns={'Date': 'Datetime'})
-
-        merged = pd.merge_asof(ltf, htf_shifted, on='Datetime', direction='backward')
-        return merged.set_index('Datetime').dropna()

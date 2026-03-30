@@ -1,64 +1,73 @@
-import numpy as np
 import pandas as pd
-from config import MAX_POSITIONS, CORRELATION_THRESHOLD
+import numpy as np
+from config import GLOBAL_EXPOSURE_LIMIT, MAX_POSITIONS, CORRELATION_THRESHOLD
+from core.paper_db import PaperDB
 from core.logger import get_logger
 
 logger = get_logger()
 
 class PortfolioManager:
-    def __init__(self, db_ref):
-        self.db = db_ref
+    def __init__(self, db: PaperDB):
+        self.db = db
 
-    def check_correlation_veto(self, new_ticker: str, new_direction: str, universe_data_dict: dict) -> bool:
-        open_trades = self.db.fetch_all("SELECT ticker, direction FROM trades WHERE status='Open'")
-        if not open_trades: return False
+    def check_correlation_veto(self, new_ticker: str, direction: str, universe_cache: dict) -> bool:
+        """Returns True if highly correlated with an existing open position."""
+        open_positions = self.db.fetch_all("SELECT ticker, direction FROM trades WHERE status = 'Open'")
+        if len(open_positions) >= MAX_POSITIONS:
+            logger.warning(f"{new_ticker} Sinyali Reddedildi: Maksimum Açık Pozisyon ({MAX_POSITIONS}) Limitine Ulaşıldı.")
+            return True
 
-        try:
-            df_new = universe_data_dict.get(new_ticker)
-            if df_new is None: return False
+        if len(open_positions) == 0: return False
 
-            for trade in open_trades:
-                open_ticker, open_dir = trade[0], trade[1]
-                df_open = universe_data_dict.get(open_ticker)
-                if df_open is None: continue
+        new_df = universe_cache.get(new_ticker)
+        if new_df is None: return True
 
-                aligned = pd.merge(df_new['Close'].tail(30), df_open['Close'].tail(30), left_index=True, right_index=True)
-                if len(aligned) > 10:
-                    corr = aligned.corr().iloc[0, 1]
-                    # Pearson > 0.75 prevents risk duplication
-                    if corr > CORRELATION_THRESHOLD and new_direction == open_dir:
-                        logger.info(f"Korelasyon Vetosu: {new_ticker} ile {open_ticker} çok benzeşiyor (Corr: {corr:.2f})")
-                        return True
-            return False
-        except Exception as e:
-            logger.error(f"Korelasyon Hesaplama Hatası: {e}")
-            return False
+        for (open_ticker, open_dir) in open_positions:
+            open_df = universe_cache.get(open_ticker)
+            if open_df is None: continue
+
+            # Combine last 30 closes for correlation
+            combined = pd.concat([new_df['Close'].tail(30), open_df['Close'].tail(30)], axis=1)
+            combined.columns = [new_ticker, open_ticker]
+            corr = combined.corr().iloc[0, 1]
+
+            if abs(corr) > CORRELATION_THRESHOLD:
+                if (corr > 0 and direction == open_dir) or (corr < 0 and direction != open_dir):
+                    logger.info(f"{new_ticker} Sinyali Korelasyon Vetosu Yedi. ({open_ticker} ile korelasyon: {corr:.2f})")
+                    return True
+
+        return False
 
     def calculate_kelly_position(self, capital: float, entry_price: float, sl_price: float) -> float:
-        trades = self.db.fetch_all("SELECT pnl FROM trades WHERE status='Closed' ORDER BY trade_id DESC LIMIT 50")
-        if not trades or len(trades) < 10:
-            win_rate, profit_factor = 0.65, 1.5
+        """Fractional Kelly Criterion + Hard Caps."""
+        closed_trades = self.db.fetch_all("SELECT pnl FROM trades WHERE status = 'Closed'")
+        wins = [t[0] for t in closed_trades if t[0] > 0]
+        losses = [abs(t[0]) for t in closed_trades if t[0] < 0]
+
+        if not wins or not losses:
+            f_star = 0.01 # Default to 1% if no history
         else:
-            wins = [t[0] for t in trades if t[0] > 0]
-            losses = [abs(t[0]) for t in trades if t[0] < 0]
-            win_rate = len(wins) / len(trades)
-            avg_win = np.mean(wins) if wins else 0
-            avg_loss = np.mean(losses) if losses else 1
-            profit_factor = avg_win / avg_loss if avg_loss > 0 else 1.5
+            win_rate = len(wins) / len(closed_trades)
+            avg_win = np.mean(wins)
+            avg_loss = np.mean(losses)
 
-        if profit_factor == 0 or win_rate == 0: return 0.0
+            b = avg_win / avg_loss if avg_loss > 0 else 1.0
+            p = win_rate
+            q = 1 - p
 
-        kelly_f = (profit_factor * win_rate - (1 - win_rate)) / profit_factor
+            # Full Kelly = (bp - q) / b
+            f_star = (b * p - q) / b if b > 0 else 0
 
-        # Fractional Kelly (Half Kelly) for conservative sizing, and hard cap limits
-        fractional_kelly = max(0, kelly_f * 0.5)
-        fractional_kelly = min(fractional_kelly, 0.04)
+        # Fractional Kelly (Half Kelly) to reduce variance & drawdown
+        f_star = f_star / 2
 
-        open_count = len(self.db.fetch_all("SELECT trade_id FROM trades WHERE status='Open'"))
-        if open_count >= MAX_POSITIONS:
-            logger.info("Global Kapasite Limitine Ulaşıldı.")
-            return 0.0
+        # Hard Caps
+        f_star = max(0.005, min(f_star, GLOBAL_EXPOSURE_LIMIT)) # Between 0.5% and Max 6%
 
-        risk_amount = capital * fractional_kelly
-        stop_distance = abs(entry_price - sl_price)
-        return risk_amount / stop_distance if stop_distance > 0 else 0
+        risk_amount = capital * f_star
+        sl_distance = abs(entry_price - sl_price)
+
+        if sl_distance <= 0: return 0.0
+
+        position_size = risk_amount / sl_distance
+        return position_size
