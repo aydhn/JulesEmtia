@@ -1,50 +1,47 @@
 import os
-import joblib
+import pickle
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from core.logger import get_logger
 
-logger = get_logger()
+log = get_logger()
+MODEL_PATH = 'models/rf_validator.pkl'
+os.makedirs('models', exist_ok=True)
 
-class MLValidator:
-    def __init__(self):
-        self.model_path = "ml_model.pkl"
-        self.model = self._load_model()
-        self.threshold = 0.60 # %60 confidence required
+def train_model(df: pd.DataFrame, target_returns_col: str = 'Log_Return', lookforward: int = 5):
+    # Shift returns backward to create targets
+    # 1 if price went up after signal, 0 otherwise
+    df['Target'] = (df[target_returns_col].rolling(lookforward).sum().shift(-lookforward) > 0).astype(int)
 
-    def _load_model(self):
-        if os.path.exists(self.model_path):
-            return joblib.load(self.model_path)
-        return RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
+    # Features
+    features = ['RSI_14', 'MACD', 'ATR_14', 'Log_Return']
+    df_clean = df.dropna(subset=features + ['Target'])
 
-    def train_model(self, df: pd.DataFrame):
-        """Trains the Random Forest on historical signals."""
-        try:
-            # Future (Next 10 bars return > 1%)
-            df['Future_Return'] = df['Close'].shift(-10) / df['Close'] - 1
-            df['Target'] = (df['Future_Return'] > 0.01).astype(int)
+    X = df_clean[features]
+    y = df_clean['Target']
 
-            features = ['RSI', 'Z_Score', 'ATR', 'Log_Return']
-            X = df[features].dropna()
-            y = df['Target'].loc[X.index]
+    clf = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
+    clf.fit(X, y)
 
-            self.model.fit(X, y)
-            joblib.dump(self.model, self.model_path)
-            logger.info("Makine Öğrenmesi Modeli başarıyla yeniden eğitildi ve kaydedildi.")
-        except Exception as e:
-            logger.error(f"ML Eğitim Hatası: {e}")
+    with open(MODEL_PATH, 'wb') as f:
+        pickle.dump(clf, f)
 
-    def ml_veto(self, current_features: list) -> bool:
-        """Returns True if the ML model vetoes the signal (Probability < Threshold)."""
-        if not hasattr(self.model, "predict_proba"):
-            return False # Bypass if model not trained yet
+    log.info(f"ML Validator trained and saved to {MODEL_PATH}. Accuracy: {clf.score(X,y):.2f}")
+    return clf
 
-        try:
-            X_live = pd.DataFrame([current_features], columns=['RSI', 'Z_Score', 'ATR'])
-            prob_success = self.model.predict_proba(X_live)[0][1]
+def validate_signal(current_features: pd.DataFrame) -> float:
+    try:
+        if not os.path.exists(MODEL_PATH):
+            return 0.5 # Default probability if no model
 
-            if prob_success < self.threshold:
-                return True # Veto!
-            return False # Approved
-        except Exception:
-            return False
+        with open(MODEL_PATH, 'rb') as f:
+            clf = pickle.load(f)
+
+        features = ['RSI_14', 'MACD', 'ATR_14', 'Log_Return']
+        X_pred = current_features[features].iloc[-1:]
+
+        prob = clf.predict_proba(X_pred)[0][1] # Probability of Class 1 (Success)
+        return prob
+    except Exception as e:
+        log.error(f"ML Validation Error: {e}")
+        return 0.5

@@ -1,40 +1,11 @@
-# Security
 .env
-# Local Database
-*.db
-*.sqlite3
-# Logs
-logs/
-*.log
-# Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-.venv
-venv/
-ENV/
-env.bak/
-venv.bak/
-# VS Code
-.vscode/
-# ML Models
+*.pyc
+*.sqlite3
+*.db
+*.log
 *.pkl
-*.joblib
+logs/
+models/
+db/
+.vscode/
