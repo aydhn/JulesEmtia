@@ -1,81 +1,106 @@
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Tuple
-from logger import log
+from typing import Dict, Any, List
 from backtester import VectorizedBacktester
-from data_loader import fetch_mtf_data, UNIVERSE
-from features import add_features
+from logger import logger
 
-def run_wfo(ticker: str, window_is: int = 500, window_oos: int = 125) -> pd.DataFrame:
+class WalkForwardOptimizer:
     """
-    Walk-Forward Optimization (Phase 14).
-    Tests Strategy robustness by sliding an In-Sample (IS) training window
-    and an Out-of-Sample (OOS) testing window across historical data.
-    Evaluates Walk-Forward Efficiency (WFE).
+    Phase 14: Walk-Forward Optimization (WFO) Engine.
+    Prevents Overfitting (Curve Fitting) by slicing data into In-Sample (IS) and Out-of-Sample (OOS) windows.
+    Zero-budget rolling window analysis.
     """
-    try:
-        log.info(f"Starting Walk-Forward Optimization for {ticker}...")
 
-        # We need synchronous data fetching for WFO to avoid asyncio loop issues in scripts
-        import yfinance as yf
-        df = yf.download(ticker, period="5y", interval="1d", progress=False)
-        if df.empty: return pd.DataFrame()
-
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
-        df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
-        df = df.ffill().dropna()
-
-        df = add_features(df)
-        if df.empty or len(df) < (window_is + window_oos):
-            log.warning(f"Not enough data for WFO on {ticker}")
+    @classmethod
+    def run_wfo(cls, ticker: str, daily_df: pd.DataFrame, hourly_df: pd.DataFrame, is_months: int = 24, oos_months: int = 6) -> pd.DataFrame:
+        """
+        Executes a Walk-Forward Optimization routine on a given asset.
+        Slices the historical data into rolling windows.
+        is_months: In-Sample training period (e.g. 24 months)
+        oos_months: Out-of-Sample testing period (e.g. 6 months)
+        Returns a DataFrame summarizing WFE (Walk-Forward Efficiency) for each window.
+        """
+        if hourly_df.empty or daily_df.empty:
+            logger.warning(f"Insufficient data for WFO on {ticker}.")
             return pd.DataFrame()
 
-        backtester = VectorizedBacktester()
+        # Ensure index is datetime
+        hourly_df.index = pd.to_datetime(hourly_df.index)
+        daily_df.index = pd.to_datetime(daily_df.index)
+
+        start_date = hourly_df.index.min()
+        end_date = hourly_df.index.max()
+
+        # Calculate window size in days
+        is_days = is_months * 30
+        oos_days = oos_months * 30
+
         results = []
 
-        num_windows = (len(df) - window_is) // window_oos
+        current_start = start_date
+        window_idx = 1
 
-        for i in range(num_windows):
-            start_is = i * window_oos
-            end_is = start_is + window_is
-            end_oos = end_is + window_oos
+        while True:
+            is_end = current_start + pd.Timedelta(days=is_days)
+            oos_end = is_end + pd.Timedelta(days=oos_days)
 
-            df_is = df.iloc[start_is:end_is]
-            df_oos = df.iloc[end_is:end_oos]
+            if oos_end > end_date:
+                break # We've reached the end of our dataset
 
-            trades_is = backtester.run_backtest(df_is, ticker)
-            trades_oos = backtester.run_backtest(df_oos, ticker)
+            # Slice the data
+            is_hourly = hourly_df[(hourly_df.index >= current_start) & (hourly_df.index < is_end)]
+            is_daily = daily_df[(daily_df.index >= current_start) & (daily_df.index < is_end)]
 
-            pnl_is = trades_is['pnl_pct'].sum() if not trades_is.empty else 0.0
-            pnl_oos = trades_oos['pnl_pct'].sum() if not trades_oos.empty else 0.0
+            oos_hourly = hourly_df[(hourly_df.index >= is_end) & (hourly_df.index < oos_end)]
+            oos_daily = daily_df[(daily_df.index >= is_end) & (daily_df.index < oos_end)]
 
-            # Annualize Returns
-            ann_pnl_is = pnl_is * (252 / window_is)
-            ann_pnl_oos = pnl_oos * (252 / window_oos)
+            logger.info(f"Running WFO Window {window_idx}: IS ({current_start.date()} to {is_end.date()}), OOS ({is_end.date()} to {oos_end.date()})")
 
-            # Walk-Forward Efficiency (WFE)
-            wfe = ann_pnl_oos / ann_pnl_is if ann_pnl_is > 0 else 0.0
+            # Run Backtests
+            is_trades = VectorizedBacktester.run_backtest(ticker, is_daily, is_hourly)
+            oos_trades = VectorizedBacktester.run_backtest(ticker, oos_daily, oos_hourly)
 
-            # Overfit Veto: If WFE < 50%, the parameter set failed to generalize
-            is_overfit = wfe < 0.50
+            is_metrics = VectorizedBacktester.analyze_results(is_trades)
+            oos_metrics = VectorizedBacktester.analyze_results(oos_trades)
+
+            # Calculate Walk-Forward Efficiency (WFE)
+            # WFE = Annualized OOS Profit / Annualized IS Profit
+            is_annual_pnl = is_metrics['Total PnL'] / (is_months / 12.0) if is_months > 0 else 0
+            oos_annual_pnl = oos_metrics['Total PnL'] / (oos_months / 12.0) if oos_months > 0 else 0
+
+            wfe = 0.0
+            if is_annual_pnl > 0:
+                wfe = (oos_annual_pnl / is_annual_pnl) * 100.0
+
+            # Robustness Check (Is WFE > 50%?)
+            is_robust = wfe >= 50.0 and oos_metrics['Total PnL'] > 0
 
             results.append({
-                "Window": i+1,
-                "IS_Start": df_is.index[0].strftime('%Y-%m-%d'),
-                "IS_End": df_is.index[-1].strftime('%Y-%m-%d'),
-                "OOS_End": df_oos.index[-1].strftime('%Y-%m-%d'),
-                "IS_PnL": pnl_is,
-                "OOS_PnL": pnl_oos,
-                "WFE": wfe,
-                "Overfit": is_overfit
+                'Window': window_idx,
+                'IS_Start': current_start.date(),
+                'IS_End': is_end.date(),
+                'OOS_Start': is_end.date(),
+                'OOS_End': oos_end.date(),
+                'IS_PnL': is_metrics['Total PnL'],
+                'IS_WinRate': is_metrics['Win Rate'],
+                'OOS_PnL': oos_metrics['Total PnL'],
+                'OOS_WinRate': oos_metrics['Win Rate'],
+                'WFE_Pct': wfe,
+                'Robust': is_robust
             })
 
-        wfo_df = pd.DataFrame(results)
-        log.info(f"WFO Completed for {ticker}. Avg WFE: {wfo_df['WFE'].mean():.2f}")
-        return wfo_df
+            # Step forward by OOS months for the next window
+            current_start += pd.Timedelta(days=oos_days)
+            window_idx += 1
 
-    except Exception as e:
-        log.error(f"WFO failed for {ticker}: {e}")
-        return pd.DataFrame()
+        wfo_df = pd.DataFrame(results)
+
+        # Log Summary
+        if not wfo_df.empty:
+            robust_pct = (wfo_df['Robust'].sum() / len(wfo_df)) * 100
+            logger.info(f"WFO Complete for {ticker}. Overall Robustness: {robust_pct:.1f}%")
+            if robust_pct < 50.0:
+                logger.warning(f"{ticker} Strategy is highly overfitted. Failed WFO.")
+
+        return wfo_df
 

@@ -1,63 +1,34 @@
 # ED Capital Quant Engine 🚀
 
-![Python Version](https://img.shields.io/badge/python-3.10-blue)
-![Architecture](https://img.shields.io/badge/architecture-SOLID-success)
-![Risk Management](https://img.shields.io/badge/risk-Fractional%20Kelly-orange)
+A low-frequency, high-win-rate, zero-budget quantitative trading bot built purely in Python.
 
-ED Capital Quant Engine, piyasa gürültüsünden arındırılmış, düşük frekanslı (Low Frequency) ve yüksek isabet oranlı (High Win-Rate) işlem fırsatlarını taramak için sıfırdan inşa edilmiş kurumsal düzeyde bir algoritmik ticaret ve paper-trading motorudur.
+Designed for autonomous operations on Commodities and Forex (TRY-based) markets, strictly adhering to **JP Morgan Risk standards** and **Bill Benter statistical modeling**.
 
-Bu mimari; **TESLA vizyonuna, JP Morgan risk algısına ve Bill Benter'ın kuantitatif dehasına** dayanan 25 aşamalı zorlu bir süreç sonucunda yaratılmıştır.
+## Features
+* **Zero Budget Ecosystem:** Built strictly using free APIs (`yfinance`), open-source libraries (`scikit-learn`, `pandas-ta`), and local execution (No AWS bills or Web scraping).
+* **Multi-Timeframe Analysis (MTF):** Uses Daily (1D) data for master trend confirmation and Hourly (1H) data for sniper entries.
+* **Risk of Ruin Prevention:** Implements dynamic ATR trailing stops, fractional Kelly Criterion position sizing, Pearson correlation limits, and VIX Circuit Breakers.
+* **Machine Learning Validation:** Employs a local `RandomForestClassifier` trained on historical anomalies to veto low-probability technical signals.
+* **NLP Sentiment Filters:** Parses free RSS feeds using NLTK VADER to confirm technical signals against current macro-economic news.
+* **Realistic Execution Modeling:** Penalizes simulated results heavily with dynamic Bid/Ask spreads and Volatility-adjusted slippage.
+* **Two-Way Telegram Command Center:** Complete remote control (Status, Pause, Resume, Panic Close, Force Scan) through Telegram bots asynchronously.
+* **Institutional Reporting:** Generates ED Capital standard "Tear Sheets" with automated Monte Carlo stress-testing metrics.
 
-## Mimari Özellikleri
+## Setup & Deployment
 
-- **Bütçe Sıfır (Zero Cost):** Tüm veri çekimi, makine öğrenmesi ve NLP süreçleri tamamen açık kaynaklı ve ücretsiz kütüphanelerle (yfinance, pandas_ta, scikit-learn, NLTK) sağlanır.
-- **Broker Soyutlama (Abstraction Layer):** SOLID prensipleri kullanılarak işlemler `BaseBroker` üzerinden yönetilir. Gelecekte gerçek borsa (Binance, Interactive Brokers) API'lerine geçiş sadece tek satır kod değiştirerek yapılabilir (`PaperBroker` -> `LiveBroker`).
-- **Lookahead Bias (Geleceği Görme) Koruması:** Çoklu Zaman Dilimi (MTF) analizleri sırasında saatlik ve günlük veriler kusursuz bir şekilde Pandas `merge_asof(direction='backward')` ile hizalanır. Algoritmanın gelecek veriyi sızdırması matematiksel olarak imkansızdır.
-- **Kesirli Kelly (Fractional Kelly) Kasa Yönetimi:** Riske edilecek anapara yüzdesi, geçmiş kazanma/kaybetme olasılıklarına göre dinamik olarak hesaplanır ve JP Morgan güvenlik tamponlarıyla (Half-Kelly, Hard Cap) sınırlandırılır.
-
-## Güvenlik ve Risk Filtreleri
-
-Sistem, bir insan müdahalesine gerek kalmadan anaparayı koruyacak acımasız kalkanlarla donatılmıştır:
-
-1. **VIX Devre Kesici (Circuit Breaker):** VIX > 35 olduğunda veya Siyah Kuğu anormalliklerinde yeni alım işlemleri kilitlenir.
-2. **Flaş Çöküş Tespit Edici (Z-Score):** Tekil emtialarda yaşanan anlık %5-10'luk flaş çöküşler Z-Score ile anında tespit edilip o varlık dondurulur.
-3. **Makine Öğrenmesi Vetosu:** Random Forest algoritması, teknik göstergelerin başarılı olma ihtimalini hesaplar. Düşük ihtimalli sinyaller acımasızca reddedilir.
-4. **Haber Duyarlılık Filtresi (NLP VADER):** Ücretsiz RSS haberleri analiz edilir. Haberlerin genel duygusu ile teknik sinyal ters düşerse, işlem veto edilir.
-5. **Korelasyon Riski Duplikasyonu:** Aynı anda birbiriyle >0.75 korelasyona sahip iki farklı varlıkta aynı yöne işlem açılarak risk katlanmaz.
-6. **Başa Baş (Breakeven) ve Dinamik İzleyen Stop:** Kâra geçen işlemlerin Stop seviyesi derhal giriş fiyatına (Risk-Free) veya kârı kilitleyecek seviyelere sadece tek yönlü (Strictly Monotonic) olarak çekilir.
-
-## Raporlama ve Stres Testi
-
-- **Monte Carlo Risk Stres Testi:** 10.000 farklı simülasyon üzerinden stratejinin "İflas Riski (Risk of Ruin)" ve %99 güven aralığında "Maksimum Düşüşü (Max Drawdown)" ölçülür.
-- **Tear Sheet PDF/HTML Çıktısı:** İşlemlerin sonuçları her hafta kurumsal "ED Capital Şablonu" ile raporlanıp Telegram'a otomatik gönderilir.
-
-## Kurulum ve Dağıtım
-
-### Gereksinimler
-- Docker & Docker Compose
-- Telegram Bot Token ve Admin Chat ID (BotFather ve IDBot üzerinden alınabilir).
-
-### Kurulum Adımları
-1. Proje dizininde `.env.example` dosyasını kopyalayarak `.env` adında yeni bir dosya oluşturun ve Telegram bilgilerinizi girin.
+1. **Configuration:**
+   Rename `.env.example` to `.env` and fill in your Telegram Bot Token and Admin Chat ID.
    ```bash
    cp .env.example .env
    ```
-2. Tüm sistemi konteynerleştirilmiş ve izole olarak arka planda çalıştırmak için betiği kullanın:
+2. **Docker Deployment:**
+   Deploy securely using the provided Docker-Compose architecture. The `paper_db.sqlite3` and `rf_model.pkl` are mounted as persistent volumes to protect your transaction history and machine learning models from container reboots.
    ```bash
    chmod +x manage_bot.sh
    ./manage_bot.sh start
    ```
-3. Botun durumunu izlemek için:
+
+3. **Log Monitoring:**
    ```bash
    ./manage_bot.sh logs
    ```
-
-### Manuel Müdahale (Telegram)
-Bot, sadece tanımlı Admin kullanıcısından gelen mesajları dinler. Aşağıdaki komutlarla sistemi anlık yönetebilirsiniz:
-- `/durum`: O anki açık pozisyonları ve kâr/zararı raporlar.
-- `/durdur`: Sistemin yeni işlem açmasını engeller (Trailing Stop'lar devam eder).
-- `/devam`: Otonom MTF tarama sistemini tekrar başlatır.
-- `/kapat_hepsi`: Panik tuşudur. Tüm pozisyonları güncel fiyattan kapatır.
-
----
-*ED Capital Quant Engine - The future is algorithmic.*

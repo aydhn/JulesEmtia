@@ -1,138 +1,137 @@
 import pandas as pd
 import numpy as np
-import os
-import joblib
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from typing import Tuple
+import joblib
+import os
+import asyncio
+from typing import Tuple, Optional
+from logger import logger
 
-from logger import log
-from features import add_features
-from data_loader import _download_yf_data, UNIVERSE
-
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', 'rf_model.joblib')
-
-def _create_labels(df: pd.DataFrame, target_return: float = 0.02, stop_loss: float = -0.01, lookforward: int = 10) -> pd.DataFrame:
+class MLValidator:
     """
-    Creates target labels for the classification model (1 = Success, 0 = Failure).
-    Checks if the price hits target_return before stop_loss within the next N periods.
+    Phase 18: Machine Learning Signal Validation
+    Uses RandomForest to validate technical signals.
+    Trains locally (zero-budget) to prevent curve-fitting and false positives.
     """
-    df = df.copy()
-    labels = []
 
-    # Iterate to simulate future paths. Avoid lookahead by shifting targets against current features
-    for i in range(len(df)):
-        if i + lookforward >= len(df):
-            labels.append(np.nan) # Drop rows where we can't look forward
-            continue
-
-        entry_price = df['close'].iloc[i]
-        future_highs = df['high'].iloc[i+1 : i+lookforward+1]
-        future_lows = df['low'].iloc[i+1 : i+lookforward+1]
-
-        # Did it hit target before stop?
-        hit_target = any(future_highs >= entry_price * (1 + target_return))
-        hit_stop = any(future_lows <= entry_price * (1 + stop_loss))
-
-        if hit_target and not hit_stop:
-            labels.append(1)
-        else:
-            labels.append(0)
-
-    df['Target'] = labels
-    return df.dropna()
-
-def train_model() -> None:
-    """
-    Trains a Random Forest Classifier using historical data across the universe.
-    """
-    log.info("Starting ML Auto-Retraining...")
-
-    all_features = []
-    all_targets = []
+    MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'rf_model.pkl')
 
     # Feature columns expected by the model
-    feature_cols = ['EMA_50', 'EMA_200', 'RSI_14', 'MACD', 'MACD_Signal', 'MACD_Hist', 'ATR_14', 'BB_Upper', 'BB_Lower', 'Log_Return']
+    FEATURES = [
+        'RSI_14', 'MACD', 'MACD_Hist', 'MACD_Signal',
+        'ATR_14', 'Z_Score_50', 'Log_Return', 'Prev_Return'
+    ]
 
-    try:
-        for name, ticker in UNIVERSE.items():
-            # Fetch 5 years of daily data for robust training
-            df = _download_yf_data(ticker, "1d", "5y")
-            if df.empty:
+    @classmethod
+    def _create_labels(cls, df: pd.DataFrame, forward_periods: int = 5, profit_threshold: float = 0.005) -> pd.DataFrame:
+        """
+        Creates binary target variable (y) for training.
+        1: Price increased by > profit_threshold in next 'N' periods (Successful Long)
+        0: Failed or went down.
+        Zero Lookahead Bias: Target is strictly based on future returns shifted backward.
+        """
+        df = df.copy()
+
+        # Calculate future return (forward-looking strictly for labeling training data)
+        df['Future_Return'] = df['Close'].shift(-forward_periods) / df['Close'] - 1
+
+        # Labeling rules: 1 if hit target, 0 otherwise
+        df['Target'] = np.where(df['Future_Return'] > profit_threshold, 1, 0)
+
+        # Drop NaN targets (the last N rows)
+        df.dropna(subset=['Target'], inplace=True)
+        return df
+
+    @classmethod
+    def train_model(cls, historical_data: dict[str, pd.DataFrame]) -> None:
+        """
+        Trains RandomForest using aggregated historical data from multiple tickers.
+        """
+        logger.info("Starting ML model training...")
+
+        all_features = []
+        all_targets = []
+
+        for ticker, data in historical_data.items():
+            if data is None or data.empty:
                 continue
 
-            df = add_features(df)
-            if df.empty:
-                continue
+            labeled_data = cls._create_labels(data)
 
-            # Create Labels (Target)
-            labeled_df = _create_labels(df)
-
-            # Ensure features are present
-            if not all(col in labeled_df.columns for col in feature_cols):
-                continue
-
-            # Normalize/Scale features (Optional, RF is robust to unscaled data)
-            X = labeled_df[feature_cols]
-            y = labeled_df['Target']
+            # Select features and targets
+            X = labeled_data[cls.FEATURES]
+            y = labeled_data['Target']
 
             all_features.append(X)
             all_targets.append(y)
 
         if not all_features:
-            log.error("ML Training failed: No valid data found across the universe.")
+            logger.warning("No data available for ML training.")
             return
 
-        X_combined = pd.concat(all_features, ignore_index=True)
-        y_combined = pd.concat(all_targets, ignore_index=True)
+        # Combine all tickers into a single training set
+        X_train = pd.concat(all_features, axis=0)
+        y_train = pd.concat(all_targets, axis=0)
 
-        # Train/Test Split
-        X_train, X_test, y_train, y_test = train_test_split(X_combined, y_combined, test_size=0.2, shuffle=False)
+        # Clean NaNs and infinite values
+        X_train.replace([np.inf, -np.inf], np.nan, inplace=True)
+        valid_idx = X_train.dropna().index
+        X_train = X_train.loc[valid_idx]
+        y_train = y_train.loc[valid_idx]
 
-        # Shallow trees to prevent overfitting, n_jobs=-1 for CPU optimization
-        rf = RandomForestClassifier(n_estimators=100, max_depth=5, min_samples_split=50, n_jobs=-1, random_state=42)
-        rf.fit(X_train, y_train)
+        logger.info(f"Training RandomForest with {len(X_train)} samples across universe.")
 
-        # Save Model
-        os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
-        joblib.dump(rf, MODEL_PATH)
+        # Initialize and Train Model
+        clf = RandomForestClassifier(
+            n_estimators=100,
+            max_depth=5,       # Shallow depth to prevent overfitting
+            min_samples_leaf=20,
+            random_state=42,
+            n_jobs=-1          # Use all CPU cores
+        )
 
-        train_acc = rf.score(X_train, y_train)
-        test_acc = rf.score(X_test, y_test)
-        log.info(f"ML Model Retrained Successfully. Train Acc: {train_acc:.2f}, Test Acc: {test_acc:.2f}")
+        clf.fit(X_train, y_train)
 
-    except Exception as e:
-        log.error(f"Error during ML retraining: {e}")
+        # Save model locally (Joblib is efficient for NumPy arrays)
+        joblib.dump(clf, cls.MODEL_PATH)
+        logger.info(f"ML Model trained and saved to {cls.MODEL_PATH}.")
 
-def validate_signal_with_ml(features_dict: dict, threshold: float = 0.60) -> bool:
-    """
-    Validates a technical signal using the Random Forest Classifier.
-    Returns True if the probability of success is >= threshold.
-    """
-    try:
-        if not os.path.exists(MODEL_PATH):
-            log.warning("ML Model not found. Bypassing ML Validation. Please run train_model().")
-            return True
+    @classmethod
+    async def async_train_model(cls, historical_data: dict[str, pd.DataFrame]) -> None:
+        """Asynchronous wrapper for scheduled weekend retraining."""
+        await asyncio.to_thread(cls.train_model, historical_data)
 
-        rf = joblib.load(MODEL_PATH)
+    @classmethod
+    def validate_signal(cls, current_features: pd.Series, threshold: float = 0.60) -> Tuple[bool, float]:
+        """
+        Validates a technical signal using the trained ML model.
+        Returns (is_approved, probability).
+        """
+        try:
+            if not os.path.exists(cls.MODEL_PATH):
+                logger.warning("ML Model not found! Bypassing ML Validation.")
+                return True, 0.5
 
-        # Expected order of features
-        feature_cols = ['EMA_50', 'EMA_200', 'RSI_14', 'MACD', 'MACD_Signal', 'MACD_Hist', 'ATR_14', 'BB_Upper', 'BB_Lower', 'Log_Return']
+            clf = joblib.load(cls.MODEL_PATH)
 
-        # Extract features for current timestamp
-        input_data = [features_dict.get(col, 0.0) for col in feature_cols]
-        X_pred = np.array([input_data])
+            # Extract relevant features
+            X_current = current_features[cls.FEATURES].to_frame().T
+            X_current.replace([np.inf, -np.inf], np.nan, inplace=True)
+            X_current.fillna(0, inplace=True) # Handle missing
 
-        # Predict Probability
-        prob = rf.predict_proba(X_pred)[0][1] # Probability of class 1 (Success)
+            # Predict Probability of Success (Class 1)
+            prob_success = clf.predict_proba(X_current)[0][1]
 
-        if prob < threshold:
-            log.info(f"ML Veto: Signal success probability ({prob:.2f}) < threshold ({threshold}).")
-            return False
+            is_approved = prob_success >= threshold
 
-        log.info(f"ML Approval: Signal success probability ({prob:.2f}) >= threshold ({threshold}).")
-        return True
+            if not is_approved:
+                logger.warning(f"ML Veto: Signal rejected. Probability {prob_success:.2f} < {threshold}.")
+            else:
+                logger.info(f"ML Approval: Signal probability {prob_success:.2f} >= {threshold}.")
 
-    except Exception as e:
-        log.error(f"ML Validation failed: {e}. Bypassing ML.")
-        return True
+            return is_approved, prob_success
+
+        except Exception as e:
+            logger.error(f"Error during ML signal validation: {e}")
+            return True, 0.5 # Fail-open in case of error
