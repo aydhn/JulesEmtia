@@ -1,74 +1,188 @@
-import sqlite3
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import time
-from functools import wraps
-from system.logger import log
+import asyncio
+from typing import Dict, Optional, Tuple
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+import feedparser
 
-def exponential_backoff(retries=3, base_delay=60):
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            for attempt in range(retries):
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    log.warning(f"API Error (Attempt {attempt+1}): {e}")
-                    time.sleep(base_delay * (2 ** attempt))
-            return None
-        return wrapper
-    return decorator
+from .infrastructure import logger
+from .config import TICKERS
+
+# Initialize NLTK VADER in memory
+try:
+    sia = SentimentIntensityAnalyzer()
+except LookupError:
+    import nltk
+    nltk.download('vader_lexicon')
+    sia = SentimentIntensityAnalyzer()
 
 class DataEngine:
-    @staticmethod
-    @exponential_backoff(retries=3)
-    def fetch_mtf_data(ticker: str) -> dict:
-        """Phase 16: MTF Data Fetching. HTF (1D) and LTF (1H) sync."""
-        htf = yf.download(ticker, period="2y", interval="1d", progress=False)
-        ltf = yf.download(ticker, period="1mo", interval="1h", progress=False)
-        if htf.empty or ltf.empty:
+    def __init__(self, tickers: Dict[str, list]):
+        self.tickers = tickers
+        # Flatten tickers list
+        self.all_tickers = [ticker for category in self.tickers.values() for ticker in category]
+        self.macro_tickers = ["DX-Y.NYB", "^TNX", "^VIX"]
+
+    def exponential_backoff(self, func, *args, max_retries=3, base_delay=60, **kwargs):
+        """Exponential Backoff logic for API limits."""
+        for attempt in range(max_retries):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"Max retries reached for {func.__name__}: {e}")
+                    return None
+                delay = base_delay * (2 ** attempt)
+                logger.warning(f"Error fetching data: {e}. Retrying in {delay} seconds...")
+                time.sleep(delay)
+
+    def _fetch_yf_data(self, ticker: str, interval: str, period: str) -> Optional[pd.DataFrame]:
+        """Core fetcher using yfinance."""
+        data = yf.Ticker(ticker).history(period=period, interval=interval)
+        if data.empty:
+            logger.warning(f"Empty dataframe returned for {ticker} at {interval}")
             return None
 
-        # Strip timezone info to avoid MergeError during asof merge
-        if htf.index.tz is not None:
-            htf.index = htf.index.tz_localize(None)
-        if ltf.index.tz is not None:
-            ltf.index = ltf.index.tz_localize(None)
+        # Drop columns like Dividends/Stock Splits for clean OHLCV
+        cols_to_keep = ["Open", "High", "Low", "Close", "Volume"]
+        available_cols = [c for c in cols_to_keep if c in data.columns]
+        data = data[available_cols]
 
-        return {"HTF": htf.ffill(), "LTF": ltf.ffill()}
+        # Phase 2: Handle Missing Data with Forward Fill
+        data.ffill(inplace=True)
+        data.dropna(inplace=True) # Any remaining NaNs at the beginning
 
-class PaperDB:
-    """Phase 5: Light, persistent, local SQLite Paper Trade DB"""
-    def __init__(self, db_name="paper_db.sqlite3"):
-        self.db_name = db_name
-        self.conn = sqlite3.connect(self.db_name, check_same_thread=False)
-        self.cursor = self.conn.cursor()
-        self.cursor.execute('''CREATE TABLE IF NOT EXISTS trades (
-            trade_id INTEGER PRIMARY KEY AUTOINCREMENT, ticker TEXT, direction TEXT,
-            entry_time TEXT, entry_price REAL, sl_price REAL, tp_price REAL,
-            position_size REAL, status TEXT, exit_time TEXT, exit_price REAL, pnl REAL)''')
-        self.conn.commit()
+        # Timezone stripping for MTF pandas.merge_asof (Critical Fix)
+        if data.index.tzinfo is not None:
+            data.index = data.index.tz_localize(None)
 
-    def open_trade(self, t: str, dir: str, p: float, sl: float, tp: float, size: float):
-        self.cursor.execute("""INSERT INTO trades
-            (ticker, direction, entry_time, entry_price, sl_price, tp_price, position_size, status)
-            VALUES (?, ?, datetime('now'), ?, ?, ?, ?, 'OPEN')""", (t, dir, p, sl, tp, size))
-        self.conn.commit()
+        return data
 
-    def update_sl(self, trade_id: int, new_sl: float):
-        self.cursor.execute("UPDATE trades SET sl_price = ? WHERE trade_id = ?", (new_sl, trade_id))
-        self.conn.commit()
+    async def fetch_mtf_data(self, ticker: str) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+        """Fetch Multi-Timeframe Data (1D for Trend, 1H for Entry)."""
+        logger.info(f"Fetching MTF data for {ticker}")
 
-    def close_trade(self, trade_id: int, exit_price: float, pnl: float):
-        self.cursor.execute("""UPDATE trades SET status='CLOSED', exit_time=datetime('now'),
-            exit_price=?, pnl=? WHERE trade_id=?""", (exit_price, pnl, trade_id))
-        self.conn.commit()
+        # Async wrapping for sync yfinance call to prevent blocking the main loop
+        loop = asyncio.get_event_loop()
 
-    def get_open_positions(self):
-        try:
-            return pd.read_sql_query("SELECT * FROM trades WHERE status='OPEN'", self.conn)
-        except Exception as e:
-            log.error(f"Error fetching open positions: {e}")
-            return pd.DataFrame()
+        df_htf = await loop.run_in_executor(
+            None,
+            lambda: self.exponential_backoff(self._fetch_yf_data, ticker, "1d", "2y")
+        )
 
-db = PaperDB()
+        df_ltf = await loop.run_in_executor(
+            None,
+            lambda: self.exponential_backoff(self._fetch_yf_data, ticker, "1h", "1mo")
+        )
+
+        return df_htf, df_ltf
+
+    def align_mtf_data(self, df_htf: pd.DataFrame, df_ltf: pd.DataFrame) -> pd.DataFrame:
+        """
+        Critical Quant Task: MTF Alignment WITHOUT Lookahead Bias (Phase 16).
+        We shift the daily (HTF) by 1 BEFORE merging, ensuring the 1H candle
+        only sees yesterday's closed daily candle.
+        """
+        # Shift HTF to simulate "end of previous day"
+        df_htf_shifted = df_htf.copy()
+
+        # Calculate daily indicators BEFORE shifting so they represent yesterday's metrics
+        # (This will be done in feature engineering, but the shift applies to all HTF columns)
+
+        df_htf_shifted = df_htf_shifted.shift(1)
+        df_htf_shifted.dropna(inplace=True)
+
+        # Rename columns to avoid collision
+        df_htf_shifted.columns = [f"HTF_{c}" for c in df_htf_shifted.columns]
+
+        # Sort indices just in case
+        df_htf_shifted.sort_index(inplace=True)
+        df_ltf.sort_index(inplace=True)
+
+        # Merge asof backward: For every hour in LTF, find the most recent previous day in HTF
+        aligned_df = pd.merge_asof(
+            df_ltf,
+            df_htf_shifted,
+            left_index=True,
+            right_index=True,
+            direction='backward'
+        )
+
+        return aligned_df
+
+    async def fetch_macro_data(self) -> Dict[str, pd.DataFrame]:
+        """Phase 6 & 19: Fetch Macro Filters (DXY, Yields) and Fear Index (VIX)."""
+        logger.info("Fetching Macro & VIX Data...")
+        macro_dfs = {}
+        for ticker in self.macro_tickers:
+            loop = asyncio.get_event_loop()
+            df = await loop.run_in_executor(
+                None,
+                lambda: self.exponential_backoff(self._fetch_yf_data, ticker, "1d", "1y")
+            )
+            if df is not None:
+                macro_dfs[ticker] = df
+
+        return macro_dfs
+
+class SentimentEngine:
+    """Phase 20: NLP VADER Sentiment Analysis via Free RSS Feeds."""
+
+    def __init__(self):
+        self.rss_urls = [
+            "https://finance.yahoo.com/news/rssindex",
+            "https://www.investing.com/rss/news_285.rss" # Commodities
+        ]
+        self.cache = {}
+        self.cache_ttl = 3600 # 1 hour
+
+    async def fetch_sentiment(self, ticker_category: str) -> float:
+        """Fetch RSS feeds and analyze sentiment asynchronously."""
+        current_time = time.time()
+        if ticker_category in self.cache:
+            score, timestamp = self.cache[ticker_category]
+            if current_time - timestamp < self.cache_ttl:
+                return score
+
+        logger.info(f"Fetching RSS News Sentiment for {ticker_category}...")
+
+        keywords = {
+            "METALS": ["gold", "silver", "copper", "metal", "mining", "palladium", "platinum"],
+            "ENERGY": ["oil", "gas", "crude", "brent", "opec", "energy"],
+            "AGRI": ["wheat", "corn", "soybean", "coffee", "sugar", "agriculture", "crop"],
+            "FOREX": ["lira", "try", "turkey", "inflation", "cbrt", "fed", "rates", "dollar", "euro"]
+        }
+
+        target_keywords = keywords.get(ticker_category, [])
+        compound_scores = []
+
+        loop = asyncio.get_event_loop()
+
+        def parse_feeds():
+            scores = []
+            for url in self.rss_urls:
+                try:
+                    feed = feedparser.parse(url)
+                    for entry in feed.entries:
+                        title = entry.title.lower()
+                        # If any keyword matches the title
+                        if any(kw in title for kw in target_keywords):
+                            sentiment = sia.polarity_scores(entry.title)
+                            scores.append(sentiment['compound'])
+                except Exception as e:
+                    logger.warning(f"RSS Feed error on {url}: {e}")
+            return scores
+
+        compound_scores = await loop.run_in_executor(None, parse_feeds)
+
+        if not compound_scores:
+            final_score = 0.0 # Neutral if no news
+        else:
+            final_score = sum(compound_scores) / len(compound_scores)
+
+        self.cache[ticker_category] = (final_score, current_time)
+        logger.info(f"Sentiment Score for {ticker_category}: {final_score:.3f}")
+        return final_score
+

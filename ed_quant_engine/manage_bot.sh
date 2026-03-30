@@ -1,25 +1,29 @@
 #!/bin/bash
+# Phase 9 & 25: Management Script
+# Usage: ./manage_bot.sh [start|stop|restart|logs|status]
 
-# A unified bash script to manage the ED Capital Quant Engine via Docker Compose.
+COMMAND=$1
 
-ACTION=$1
-
-case "$ACTION" in
+case "$COMMAND" in
     start)
-        echo "Starting ED Quant Engine in background..."
+        echo "Starting ED Capital Quant Engine..."
         docker-compose up -d --build
+        echo "Bot started in background."
         ;;
     stop)
-        echo "Stopping ED Quant Engine..."
+        echo "Stopping ED Capital Quant Engine..."
         docker-compose down
+        echo "Bot stopped safely."
         ;;
     restart)
-        echo "Restarting ED Quant Engine..."
-        docker-compose restart
+        echo "Restarting ED Capital Quant Engine..."
+        docker-compose down
+        docker-compose up -d --build
+        echo "Bot restarted successfully."
         ;;
     logs)
-        echo "Tailing logs... (Press Ctrl+C to exit)"
-        docker-compose logs -f --tail=100
+        echo "Streaming logs... (Ctrl+C to exit)"
+        docker-compose logs -f
         ;;
     status)
         echo "Checking container status..."
@@ -27,6 +31,6 @@ case "$ACTION" in
         ;;
     *)
         echo "Usage: ./manage_bot.sh {start|stop|restart|logs|status}"
-        # Exit removed to prevent blocking bash session
+        # removed exit 1 to not kill parent shell
         ;;
 esac

@@ -3,22 +3,17 @@ version: '3.8'
 services:
   quant_engine:
     build: .
-    image: ed_quant_engine:latest
-    container_name: ed_quant_bot
+    container_name: ed_quant_engine
     restart: unless-stopped
     environment:
-      - TZ=Europe/Istanbul
+      - TZ=Europe/Istanbul  # Critical for Financial Timing Sync
       - LOG_LEVEL=INFO
     env_file:
       - .env
     volumes:
-      # Persistent Data Mapping to Host
+      # Persistent Storage Volumes (Phase 25 Rules)
       - ./data:/app/data
       - ./logs:/app/logs
       - ./models:/app/models
       - ./reports:/app/reports
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+    command: python main.py

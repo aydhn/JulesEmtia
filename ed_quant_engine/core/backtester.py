@@ -1,145 +1,154 @@
 import pandas as pd
 import numpy as np
-import yfinance as yf
-from core.quant_logic import Strategy
-from system.logger import log
+import itertools
+from typing import Dict, Any, List, Tuple
 
-class Backtester:
-    def __init__(self, ticker, period="5y"):
+from .quant_models import add_features
+from .config import INITIAL_CAPITAL, SPREADS, TICKERS
+from .infrastructure import logger
+
+class FastBacktester:
+    """Phase 7: Vectorized Historical Backtesting Engine."""
+
+    def __init__(self, df: pd.DataFrame, ticker: str):
+        self.df = df.copy()
         self.ticker = ticker
-        self.period = period
-        self.df = None
 
-    def fetch_data(self):
-        log.info(f"Fetching {self.period} data for {self.ticker} Backtest...")
-        df_1d = yf.download(self.ticker, period=self.period, interval="1d", progress=False)
+        # Determine base spread (Phase 21)
+        category = next((k for k, v in TICKERS.items() if ticker in v), "FOREX")
+        self.base_spread = SPREADS.get(category, 0.001)
 
-        # Simulating 1H precision on daily data for speed/limitations.
-        # In a real WFO, you'd fetch massive 1H chunks and merge.
-        if df_1d.empty:
-            log.warning(f"No data for {self.ticker}")
-            return False
-
-        self.df = Strategy.add_features(df_1d.ffill())
-        return not self.df.empty
-
-    def run_backtest(self, rsi_ob=70, rsi_os=30, ema_trend=50):
-        """Phase 7: Vectorized historical backtest simulation"""
-        if self.df is None or self.df.empty:
-            return None
-
+    def run_backtest(self, rsi_ob=70, rsi_os=30, atr_sl_mult=1.5, atr_tp_mult=3.0) -> Dict[str, Any]:
+        """Runs a vectorized backtest over the dataframe."""
         df = self.df.copy()
-        df['Prev_Close'] = df['Close'].shift(1)
-        df[f'Prev_EMA_{ema_trend}'] = df[f'EMA_{ema_trend}'].shift(1) if f'EMA_{ema_trend}' in df.columns else df['EMA_50'].shift(1)
-        df['Prev_RSI'] = df['RSI_14'].shift(1)
-        df['Prev_MACDh'] = df['MACD_Hist'].shift(1)
-        df['Prev_BBL'] = df['BB_LOWER'].shift(1)
-        df['Prev_BBU'] = df['BB_UPPER'].shift(1)
-        df['Prev_ATR'] = df['ATR'].shift(1)
 
-        # Long
-        buy_cond = (df['Prev_Close'] > df[f'Prev_EMA_{ema_trend}']) & \
-                   ((df['Prev_RSI'] < rsi_os) | (df['Prev_Close'] <= df['Prev_BBL'])) & \
-                   (df['Prev_MACDh'] > 0)
+        # 1. Signal Generation (Vectorized Phase 4)
+        # Long Conditions
+        trend_up = df['Close'] > df['EMA_50']
+        rsi_bull = (df['RSI_14'].shift(1) < rsi_os) & (df['RSI_14'] >= rsi_os)
 
-        # Short
-        sell_cond = (df['Prev_Close'] < df[f'Prev_EMA_{ema_trend}']) & \
-                    ((df['Prev_RSI'] > rsi_ob) | (df['Prev_Close'] >= df['Prev_BBU'])) & \
-                    (df['Prev_MACDh'] < 0)
+        # Short Conditions
+        trend_down = df['Close'] < df['EMA_50']
+        rsi_bear = (df['RSI_14'].shift(1) > rsi_ob) & (df['RSI_14'] <= rsi_ob)
 
-        df['Signal'] = np.where(buy_cond, 1, np.where(sell_cond, -1, 0))
+        df['Signal'] = 0
+        df.loc[trend_up & rsi_bull, 'Signal'] = 1
+        df.loc[trend_down & rsi_bear, 'Signal'] = -1
 
-        # Execution Simulator (Vectorized approximations)
+        # 2. Execution Simulation
         trades = []
-        open_pos = 0
+        in_position = 0 # 1 for Long, -1 for Short
+        entry_price = 0.0
+        sl_price = 0.0
+        tp_price = 0.0
+        entry_idx = None
 
-        for i, row in df.iterrows():
-            if open_pos == 0 and row['Signal'] != 0:
-                open_pos = row['Signal']
-                entry = row['Close']
-                atr = row['Prev_ATR']
-                sl = entry - (1.5*atr) if open_pos == 1 else entry + (1.5*atr)
-                tp = entry + (3.0*atr) if open_pos == 1 else entry - (3.0*atr)
+        # We must iterate for path-dependent Trailing Stops and TP/SL hits
+        for i in range(1, len(df)):
+            row = df.iloc[i]
+            prev_row = df.iloc[i-1]
 
-                trades.append({
-                    'entry_date': i, 'dir': open_pos, 'entry': entry,
-                    'sl': sl, 'tp': tp, 'atr': atr, 'status': 'OPEN'
-                })
-            elif open_pos != 0:
-                curr_trade = trades[-1]
-                p = row['Close']
-                # SL / TP Hit Check
-                if (curr_trade['dir'] == 1 and (p <= curr_trade['sl'] or p >= curr_trade['tp'])) or \
-                   (curr_trade['dir'] == -1 and (p >= curr_trade['sl'] or p <= curr_trade['tp'])):
+            # Check for exits if in position
+            if in_position == 1:
+                # Hit SL (Low went below SL)
+                if row['Low'] <= sl_price:
+                    exit_price = sl_price - (self.base_spread / 2) - (0.5 * row['ATRr_14']) # Slippage
+                    pnl = (exit_price - entry_price) / entry_price
+                    trades.append({'type': 'Long', 'entry': entry_price, 'exit': exit_price, 'pnl': pnl})
+                    in_position = 0
+                # Hit TP (High went above TP)
+                elif row['High'] >= tp_price:
+                    exit_price = tp_price - (self.base_spread / 2) - (0.5 * row['ATRr_14'])
+                    pnl = (exit_price - entry_price) / entry_price
+                    trades.append({'type': 'Long', 'entry': entry_price, 'exit': exit_price, 'pnl': pnl})
+                    in_position = 0
+                else:
+                    # Trailing Stop Update (Phase 12)
+                    new_sl = row['Close'] - (atr_sl_mult * row['ATRr_14'])
+                    if new_sl > sl_price:
+                        sl_price = new_sl
 
-                    exit_p = curr_trade['sl'] if (curr_trade['dir']==1 and p<=curr_trade['sl']) or (curr_trade['dir']==-1 and p>=curr_trade['sl']) else curr_trade['tp']
+            elif in_position == -1:
+                if row['High'] >= sl_price:
+                    exit_price = sl_price + (self.base_spread / 2) + (0.5 * row['ATRr_14'])
+                    pnl = (entry_price - exit_price) / entry_price
+                    trades.append({'type': 'Short', 'entry': entry_price, 'exit': exit_price, 'pnl': pnl})
+                    in_position = 0
+                elif row['Low'] <= tp_price:
+                    exit_price = tp_price + (self.base_spread / 2) + (0.5 * row['ATRr_14'])
+                    pnl = (entry_price - exit_price) / entry_price
+                    trades.append({'type': 'Short', 'entry': entry_price, 'exit': exit_price, 'pnl': pnl})
+                    in_position = 0
+                else:
+                    # Trailing Stop Update
+                    new_sl = row['Close'] + (atr_sl_mult * row['ATRr_14'])
+                    if new_sl < sl_price:
+                        sl_price = new_sl
 
-                    # Slippage 0.1% + Commission 0.05%
-                    slip_cost = exit_p * 0.0015
+            # Check for entries if flat
+            if in_position == 0:
+                signal = prev_row['Signal'] # Use previous closed candle signal
+                if signal == 1:
+                    in_position = 1
+                    entry_price = row['Open'] + (self.base_spread / 2) + (0.5 * row['ATRr_14'])
+                    sl_price = entry_price - (atr_sl_mult * row['ATRr_14'])
+                    tp_price = entry_price + (atr_tp_mult * row['ATRr_14'])
+                elif signal == -1:
+                    in_position = -1
+                    entry_price = row['Open'] - (self.base_spread / 2) - (0.5 * row['ATRr_14'])
+                    sl_price = entry_price + (atr_sl_mult * row['ATRr_14'])
+                    tp_price = entry_price - (atr_tp_mult * row['ATRr_14'])
 
-                    pnl_raw = (exit_p - curr_trade['entry']) if curr_trade['dir'] == 1 else (curr_trade['entry'] - exit_p)
-                    pnl_net = pnl_raw - slip_cost - (curr_trade['entry']*0.0015)
+        # 3. Calculate Metrics
+        trades_df = pd.DataFrame(trades)
+        if trades_df.empty:
+            return {"win_rate": 0, "profit_factor": 0, "total_pnl": 0, "trades": 0, "max_dd": 0}
 
-                    curr_trade['exit_date'] = i
-                    curr_trade['exit'] = exit_p
-                    curr_trade['pnl'] = pnl_net
-                    curr_trade['status'] = 'CLOSED'
-                    open_pos = 0
+        wins = trades_df[trades_df['pnl'] > 0]
+        losses = trades_df[trades_df['pnl'] <= 0]
 
-        res = [t for t in trades if t['status'] == 'CLOSED']
-        if not res: return 0.0, 0.0
+        win_rate = len(wins) / len(trades_df) if len(trades_df) > 0 else 0
+        gross_profit = wins['pnl'].sum() if not wins.empty else 0
+        gross_loss = abs(losses['pnl'].sum()) if not losses.empty else 1e-9
+        profit_factor = gross_profit / gross_loss
 
-        wins = [t for t in res if t['pnl'] > 0]
-        win_rate = len(wins) / len(res)
-        net_profit = sum(t['pnl'] for t in res)
-        return net_profit, win_rate
+        # Cumulative PnL for Drawdown
+        trades_df['cum_pnl'] = (1 + trades_df['pnl']).cumprod()
+        running_max = trades_df['cum_pnl'].cummax()
+        drawdown = (running_max - trades_df['cum_pnl']) / running_max
+        max_dd = drawdown.max()
 
-    def walk_forward_optimization(self):
-        """Phase 14: OOS / IS testing"""
-        if self.df is None or len(self.df) < 500:
-            return "Not enough data for WFO"
+        total_pnl_pct = trades_df['cum_pnl'].iloc[-1] - 1 if not trades_df.empty else 0
 
-        splits = np.array_split(self.df, 3) # 3 windows
+        return {
+            "win_rate": win_rate,
+            "profit_factor": profit_factor,
+            "total_pnl": total_pnl_pct,
+            "trades": len(trades_df),
+            "max_dd": max_dd
+        }
 
-        results = []
-        for i in range(len(splits) - 1):
-            is_df = splits[i]
-            oos_df = splits[i+1]
+    def grid_search_optimization(self) -> Dict[str, Any]:
+        """CPU Friendly Grid Search for RSI & ATR parameters."""
+        logger.info(f"Running Grid Search Optimization for {self.ticker}...")
 
-            # Simple grid search on IS
-            best_net = -9999
-            best_params = None
+        rsi_os_range = [25, 30, 35]
+        atr_sl_range = [1.5, 2.0]
+        atr_tp_range = [2.0, 3.0]
 
-            for r_os in [25, 30]:
-                for r_ob in [70, 75]:
-                    self.df = is_df
-                    net, wr = self.run_backtest(rsi_ob=r_ob, rsi_os=r_os)
-                    if net > best_net:
-                        best_net = net
-                        best_params = (r_ob, r_os)
+        best_result = None
+        best_params = None
+        max_pnl = -float('inf')
 
-            # Test on OOS
-            self.df = oos_df
-            if best_params:
-                oos_net, oos_wr = self.run_backtest(rsi_ob=best_params[0], rsi_os=best_params[1])
+        for rsi_os, atr_sl, atr_tp in itertools.product(rsi_os_range, atr_sl_range, atr_tp_range):
+            rsi_ob = 100 - rsi_os
+            result = self.run_backtest(rsi_ob=rsi_ob, rsi_os=rsi_os, atr_sl_mult=atr_sl, atr_tp_mult=atr_tp)
 
-                # WFE
-                wfe = (oos_net / max(1, best_net)) * 100
-                status = "Robust" if wfe > 50 else "Overfitted"
+            # Optimization Goal: Highest PnL with acceptable Win Rate and Drawdown
+            if result['trades'] > 5 and result['win_rate'] > 0.40 and result['max_dd'] < 0.25:
+                if result['total_pnl'] > max_pnl:
+                    max_pnl = result['total_pnl']
+                    best_result = result
+                    best_params = {"rsi_os": rsi_os, "rsi_ob": rsi_ob, "atr_sl": atr_sl, "atr_tp": atr_tp}
 
-                results.append({
-                    'window': i, 'params': best_params,
-                    'IS_Net': best_net, 'OOS_Net': oos_net,
-                    'WFE_%': wfe, 'Status': status
-                })
-
-        self.fetch_data() # restore full df
-        return pd.DataFrame(results)
-
-if __name__ == "__main__":
-    bt = Backtester("GC=F")
-    if bt.fetch_data():
-        net, wr = bt.run_backtest()
-        print(f"Backtest Net: {net:.2f}, Win Rate: {wr*100:.1f}%")
-        print("\nWFO Results:")
-        print(bt.walk_forward_optimization())
+        return {"best_params": best_params, "best_metrics": best_result}
