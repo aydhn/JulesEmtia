@@ -1,193 +1,322 @@
+"""
+ED Capital Quant Engine - Otonom İşlem Motoru (Main Loop)
+Vizyon: SIFIR BÜTÇE, Katı Kurumsal Algoritmalar, Yüksek Win Rate.
+Bu dosya sistemin kalbidir ve docker-compose veya systemd üzerinden 7/24 çalışır.
+"""
 import asyncio
 import schedule
-from datetime import datetime
+import time
+import os
 import gc
-from logger import logger
-import config
-from universe import TICKERS
-from data_loader import fetch_mtf_data
-from features import add_features
-from macro_filter import macro_filter
-from sentiment_filter import sentiment_filter
-from ml_validator import ml_validator
-from portfolio_manager import portfolio_manager
-from strategy import generate_signals
-from paper_broker import PaperBroker
+from datetime import datetime, timedelta
+import pandas as pd
+import sys
 
-from notifier import notifier
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from src.config import get_all_tickers, VIX_CIRCUIT_BREAKER
+from src.logger import log_info, log_error, log_warning, log_critical
+from src.data_loader import load_universe_mtf, fetch_data_sync
+from src.features import add_features, merge_mtf_data
+from src.strategy import analyze_signals
+from src.macro_filter import check_black_swan, check_flash_crash, get_market_regime
+from src.portfolio_manager import PortfolioManager
+from src.broker import PaperBroker
+from src.execution_model import apply_execution_costs
+import src.notifier as nt
 
+# Global Nesneler
 broker = PaperBroker()
+portfolio_manager = PortfolioManager()
 
-async def manage_open_positions():
-    ''' Phase 12: Trailing Stop & Breakeven logic '''
-    positions = await broker.get_open_positions()
-    if not positions: return
+# --- ARKA PLAN (Background) GÖREVLERİ ---
+def retrain_ml_models():
+    """Haftalık (Pazar günleri) otonom makine öğrenmesi yeniden eğitimi."""
+    log_info("🤖 Haftalık ML Modelleri Yeniden Eğitiliyor...")
+    from src.ml_validator import train_and_save_model
+    tickers = get_all_tickers()
+    for ticker in tickers:
+        df_htf = fetch_data_sync(ticker, period="2y", interval="1d")
+        df_ltf = fetch_data_sync(ticker, period="60d", interval="1h")
 
-    logger.info(f"Managing {len(positions)} open positions...")
+        if df_htf is not None and df_ltf is not None:
+            df_htf_feat = add_features(df_htf, is_htf=True)
+            df_ltf_feat = add_features(df_ltf, is_htf=False)
+            df_merged = merge_mtf_data(df_ltf_feat, df_htf_feat)
+            train_and_save_model(ticker, df_merged)
+    log_info("🤖 ML Eğitim Süreci Tamamlandı.")
 
-    for pos in positions:
-        trade_id = pos['trade_id']
-        ticker = pos['ticker']
-        direction = pos['direction']
-        entry_price = pos['entry_price']
-        sl_price = pos['sl_price']
-        tp_price = pos['tp_price']
+def daily_heartbeat():
+    """Günlük canlılık sinyali (Her sabah 08:00)."""
+    balance = broker.get_account_balance()
+    trades = broker.get_open_positions()
+    msg = f"🟢 <b>SİSTEM AKTİF (Heartbeat)</b>\nKasa: <b>${balance:,.2f}</b>\nTakip Edilen Açık İşlem: <b>{len(trades)}</b>\nSiyah Kuğu / VIX: Normal"
+    nt.send_telegram_message(msg)
 
-        import data_loader
-        df_1m = await data_loader.fetch_data_with_retry(ticker, "1d", "1m", retries=2)
-        if df_1m.empty: continue
+def weekly_report():
+    """Cuma akşamı kurumsal rapor (Tear Sheet) gönderimi."""
+    from src.reporter import generate_tear_sheet
+    file_path = generate_tear_sheet()
+    if file_path:
+        asyncio.run(nt.send_document(file_path, caption="ED Capital Haftalık Yönetim Özeti"))
+    log_info("📄 Haftalık Tear Sheet gönderildi.")
 
-        current_price = df_1m['Close'].iloc[-1].item()
+# --- ANA İŞLEM DÖNGÜSÜ (Trading Loop) ---
+async def execute_trading_cycle():
+    """
+    Her saat başı veya manuel tetiklenen tam tur tarama ve yönetim döngüsü.
+    Adımlar:
+    1. Açık İşlemleri Yönet (Kâr Al, Zarar Kes, İzleyen Stop, Siyah Kuğu Acil Çıkış)
+    2. Manuel Müdahale veya Panik Butonu (kapat_hepsi) var mı?
+    3. MTF Veri Çek ve Korelasyon Matrisini Güncelle
+    4. Makro Filtreler (VIX Devre Kesici)
+    5. Yeni Sinyal Ara (Strateji + ML + Sentiment + Kelly)
+    6. Emir İletimi (Execution)
+    """
+    log_info("🔄 Canlı Ticaret Döngüsü (Trading Cycle) Başladı.")
+    tickers = get_all_tickers()
+    current_balance = broker.get_account_balance()
 
-        from execution_model import get_execution_price
-        current_atr = current_price * 0.005
-        avg_atr = current_atr
+    # 1. ACİL DURUM: Kullanıcı Panik Kapatması İstedi mi? (/kapat_hepsi)
+    if nt.PANIC_CLOSE:
+        log_critical("🚨 PANİK KAPATMASI İŞLENİYOR! Tüm açık pozisyonlar tasfiye edilecek!")
+        open_trades = broker.get_open_positions()
+        for t in open_trades:
+            # Anlık fiyatı (hızlıca) çek
+            try:
+                df = fetch_data_sync(t['ticker'], period="1d", interval="1m")
+                current_price = df['Close'].iloc[-1]
+                # Fallback atr
+                exit_price, _, _ = apply_execution_costs(t['ticker'], "Short" if t['direction']=="Long" else "Long", current_price, current_price*0.01, current_price*0.01)
+                broker.close_position(t['trade_id'], exit_price, "Panik (Kapat Hepsi)")
+            except Exception as e:
+                log_error(f"Acil Kapatma Hatası ({t['ticker']}): {e}")
+        nt.PANIC_CLOSE = False
+        nt.send_telegram_message("✅ Panik tasfiyesi tamamlandı.")
+        return # Bu döngüyü sonlandır
 
-        exit_price = get_execution_price(ticker, current_price, "Short" if direction=="Long" else "Long", current_atr, avg_atr)
+    # MTF Veri Çekimi (Asenkron)
+    universe_mtf = await load_universe_mtf(tickers)
 
-        hit_tp = False
-        hit_sl = False
+    # İşlenmiş Verileri Tutmak İçin (Çoklu okumayı engellemek adına)
+    processed_mtf = {}
+    df_vix = None
+    df_dxy = None
+    df_tnx = None
 
-        if direction == "Long":
-            if current_price >= tp_price: hit_tp = True
-            elif current_price <= sl_price: hit_sl = True
-        else:
-            if current_price <= tp_price: hit_tp = True
-            elif current_price >= sl_price: hit_sl = True
-
-        if hit_tp or hit_sl:
-            pnl = await broker.close_position(trade_id, exit_price)
-            reason = "Kâr Al (TP)" if hit_tp else "Zarar Kes (SL)"
-            logger.info(f"Position Closed: {direction} {ticker} @ {exit_price:.4f} ({reason}) PnL: ${pnl:.2f}")
-            await notifier.send_message(f"🔔 İşlem Kapandı: {direction} {ticker}Neden: {reason}Çıkış: {exit_price:.4f}PnL: ${pnl:.2f}")
+    for ticker, data in universe_mtf.items():
+        if data.get('1d') is None or data.get('1h') is None:
             continue
 
-        dist_moved = (current_price - entry_price) if direction == "Long" else (entry_price - current_price)
+        # Makro verileri (VIX, DXY, TNX) ayrı tut
+        if ticker == "^VIX": df_vix = data['1d']; continue
+        if ticker == "DX-Y.NYB": df_dxy = data['1d']; continue
+        if ticker == "^TNX": df_tnx = data['1d']; continue
+        if ticker == "USDTRY=X": pass # Döviz için de features hesaplanacak
 
-        if dist_moved > current_atr:
-             if direction == "Long" and sl_price < entry_price:
-                 await broker.modify_trailing_stop(trade_id, entry_price)
-                 await notifier.send_message(f"🔒 Risk Sıfırlandı: {ticker} SL seviyesi giriş fiyatına çekildi (Breakeven).")
-             elif direction == "Short" and sl_price > entry_price:
-                 await broker.modify_trailing_stop(trade_id, entry_price)
-                 await notifier.send_message(f"🔒 Risk Sıfırlandı: {ticker} SL seviyesi giriş fiyatına çekildi (Breakeven).")
+        # Özellik mühendisliği ve MTF birleştirme (Features.py)
+        df_htf_feat = add_features(data['1d'], is_htf=True)
+        df_ltf_feat = add_features(data['1h'], is_htf=False)
+        df_merged = merge_mtf_data(df_ltf_feat, df_htf_feat)
 
-        # Trailing stop update logic
-        if direction == "Long" and current_price > (sl_price + 1.5 * current_atr):
-            new_sl = current_price - (1.5 * current_atr)
-            if new_sl > sl_price:
-                await broker.modify_trailing_stop(trade_id, new_sl)
-        elif direction == "Short" and current_price < (sl_price - 1.5 * current_atr):
-            new_sl = current_price + (1.5 * current_atr)
-            if new_sl < sl_price:
-                 await broker.modify_trailing_stop(trade_id, new_sl)
+        # Sadece son kısımları tut (Hafıza optimizasyonu)
+        processed_mtf[ticker] = {
+            "1d": df_htf_feat.tail(50),
+            "1h": df_merged.tail(100)
+        }
 
-async def run_live_cycle():
-    ''' Phase 23: Asynchronous Pipeline Orchestration '''
-    logger.info("=== Starting Live MTF Cycle ===")
+    # 2. VIX DEVRE KESİCİ (Black Swan Protection)
+    vix_panic = False
+    if df_vix is not None:
+        vix_panic = check_black_swan(df_vix, VIX_CIRCUIT_BREAKER)
 
-    await macro_filter.fetch_macro_data()
-    await sentiment_filter.fetch_news()
+    if vix_panic:
+        nt.send_telegram_message(f"🚨 <b>VIX DEVRE KESİCİ TETİKLENDİ!</b>\nVIX Seviyesi: {df_vix['Close'].iloc[-1]:.2f}\nYeni alımlar durduruldu, açık pozisyonlar acil koruma moduna alındı.")
 
-    await manage_open_positions()
+    # Korelasyon Matrisini Güncelle (Son 60 gün HTF verisiyle)
+    portfolio_manager.update_correlation_matrix(processed_mtf)
 
-    if await macro_filter.check_vix_circuit_breaker():
-         if not notifier.is_paused:
-             await notifier.send_message("🚨 KRİTİK UYARI: VIX Devre Kesici Tetiklendi! Yeni İşlemler Durduruldu.")
-             notifier.is_paused = True
-         return
+    # 3. AÇIK İŞLEMLERİN YÖNETİMİ (Kâr Koruma, TP/SL, Trailing Stop)
+    open_trades = broker.get_open_positions()
+    for trade in open_trades:
+        trade_id = trade['trade_id']
+        ticker = trade['ticker']
+        direction = trade['direction']
+        entry_price = trade['entry_price']
+        sl = trade['sl_price']
+        tp = trade['tp_price']
 
-    open_positions = await broker.get_open_positions()
-    if not portfolio_manager.check_global_limits(open_positions):
-         logger.info("Global Exposure Limit reached. Skipping new signals.")
-         return
+        if ticker not in processed_mtf: continue
 
-    if notifier.is_paused:
-         logger.info("Scanner paused by admin.")
-         return
+        df_current = processed_mtf[ticker]['1h']
+        current_price = df_current['Close'].iloc[-1]
+        atr = df_current['ATRr_14'].iloc[-1]
 
-    import yfinance as yf
-    import pandas as pd
-    flat_tickers = [t for v in TICKERS.values() for t in v]
-    returns_df = await portfolio_manager.fetch_daily_returns_matrix(flat_tickers)
-    corr_matrix = portfolio_manager.calculate_correlation_matrix(returns_df)
+        # Z-Score Anomali Koruması (Flaş Çöküş)
+        if check_flash_crash(df_current):
+            log_critical(f"🚨 FLAŞ ÇÖKÜŞ KORUMASI: {ticker} Anormal Fiyat Hareketi. Pozisyon acil kapatılıyor.")
+            exit_price, _, _ = apply_execution_costs(ticker, "Short" if direction=="Long" else "Long", current_price, atr, atr)
+            broker.close_position(trade_id, exit_price, "Flash Crash Halt")
+            nt.send_telegram_message(f"🚨 <b>FLAŞ ÇÖKÜŞ:</b> {ticker} pozisyonu {current_price:.4f} fiyatından tasfiye edildi.")
+            continue
 
-    current_balance = await broker.get_account_balance()
-    from paper_db import paper_db
-    recent_trades = paper_db.get_recent_trades(limit=50)
+        # VIX Paniği Varsa Agresif Çıkış (SL'yi mevcut fiyata çek, kârı kilitle)
+        if vix_panic and ((direction == "Long" and current_price > entry_price) or (direction == "Short" and current_price < entry_price)):
+            log_warning(f"VIX Paniği: {ticker} kârda kapatılıyor.")
+            exit_price, _, _ = apply_execution_costs(ticker, "Short" if direction=="Long" else "Long", current_price, atr, atr)
+            broker.close_position(trade_id, exit_price, "VIX Panic Lock-In")
+            nt.send_telegram_message(f"🔒 <b>VIX PANİĞİ:</b> {ticker} pozisyonu kârla kapatılarak anapara korundu.")
+            continue
 
-    for category, tickers in TICKERS.items():
-        for ticker in tickers:
-            df = await fetch_mtf_data(ticker)
-            if df.empty: continue
+        # TP ve SL Vurma Kontrolü
+        hit_sl = False
+        hit_tp = False
+        if direction == "Long":
+            if current_price <= sl: hit_sl = True
+            elif current_price >= tp: hit_tp = True
+        else: # Short
+            if current_price >= sl: hit_sl = True
+            elif current_price <= tp: hit_tp = True
 
-            if macro_filter.check_zscore_anomaly(df):
-                logger.warning(f"Z-Score anomaly detected on {ticker}. Skipping.")
-                continue
+        if hit_sl:
+            exit_price, _, _ = apply_execution_costs(ticker, "Short" if direction=="Long" else "Long", current_price, atr, atr)
+            broker.close_position(trade_id, exit_price, "Stop-Loss Hit")
+            nt.send_telegram_message(f"🔴 <b>STOP-LOSS:</b> {ticker} pozisyonu {current_price:.4f} fiyatından kapandı.")
+            continue
+        if hit_tp:
+            exit_price, _, _ = apply_execution_costs(ticker, "Short" if direction=="Long" else "Long", current_price, atr, atr)
+            broker.close_position(trade_id, exit_price, "Take-Profit Hit")
+            nt.send_telegram_message(f"🟢 <b>TAKE-PROFIT:</b> {ticker} pozisyonu {current_price:.4f} hedefinden başarıyla kapandı.")
+            continue
 
-            df_feat = add_features(df)
+        # İZLEYEN STOP (Trailing Stop) & BAŞA BAŞ (Breakeven) KONTROLÜ
+        # Fiyat lehimize %50 ATR gittiyse (Breakeven)
+        # Fiyat yeni tepe yaptıysa SL'yi arkasından çek. SADECE MONOTONİK (Lehe hareket edebilir)
+        new_sl = sl
+        if direction == "Long":
+            # Breakeven
+            if current_price > entry_price + (1.0 * atr) and sl < entry_price:
+                new_sl = entry_price
+                log_info(f"🛡️ BREAKEVEN: {ticker} SL giriş fiyatına çekildi.")
+            # Trailing
+            trailing_level = current_price - (1.5 * atr)
+            if trailing_level > new_sl: # Asla geri çekilemez (Monotonic strict)
+                new_sl = trailing_level
+        else: # Short
+            if current_price < entry_price - (1.0 * atr) and sl > entry_price:
+                new_sl = entry_price
+                log_info(f"🛡️ BREAKEVEN: {ticker} SL giriş fiyatına çekildi.")
+            trailing_level = current_price + (1.5 * atr)
+            if trailing_level < new_sl:
+                new_sl = trailing_level
 
-            signal = generate_signals(df_feat, ticker, current_balance, open_positions, corr_matrix, recent_trades)
+        if new_sl != sl:
+            broker.modify_trailing_stop(trade_id, new_sl)
+            nt.send_telegram_message(f"🔒 <b>İZLEYEN STOP GÜNCELLENDİ:</b> {ticker} SL Seviyesi: {new_sl:.4f}")
 
-            if signal:
-                await broker.place_order(
-                    signal['ticker'], signal['direction'], signal['size'],
-                    signal['entry_price'], signal['sl_price'], signal['tp_price']
-                )
+    # 4. YENİ SİNYAL ARAMA VE EMİR İLETİMİ (Kullanıcı /durdur demediyse ve VIX normalse)
+    if nt.SYSTEM_PAUSED:
+        log_info("⏸️ Sistem Duraklatıldı (Paused). Yeni sinyal taraması atlandı.")
+    elif vix_panic:
+        log_info("🚨 VIX Siyah Kuğu Rejimi! Yeni sinyal aranmıyor, sadece savunma yapılıyor.")
+    else:
+        # Piyasada yeni açık işlemler listesi (Yukarıda bazıları kapanmış olabilir)
+        current_open_trades = broker.get_open_positions()
 
-                msg = f"🟢 YENI ISLEM AÇILDI: {signal['direction']} {signal['ticker']}"                       f"Giriş: {signal['entry_price']:.4f}"                       f"SL: {signal['sl_price']:.4f} | TP: {signal['tp_price']:.4f}"                       f"Miktar: {signal['size']:.4f}"
-                await notifier.send_message(msg)
+        # Strateji Motoru (MTF + ML + Sentiment + Kelly dahil)
+        new_signals = analyze_signals(processed_mtf, current_balance, portfolio_manager, current_open_trades)
 
+        for sig in new_signals:
+            log_info(f"🚀 ONAYLANMIŞ EMİR: {sig['ticker']} {sig['direction']} | Lot: {sig['position_size']:.4f}")
+
+            trade_id = broker.place_market_order(
+                ticker=sig['ticker'],
+                direction=sig['direction'],
+                qty=sig['position_size'],
+                current_price=sig['entry_price'], # Maliyetler eklenmiş fiyat
+                sl=sig['sl_price'],
+                tp=sig['tp_price'],
+                slippage=sig['slippage'],
+                spread=sig['spread']
+            )
+
+            if trade_id:
+                msg = f"🚀 <b>YENİ İŞLEM AÇILDI!</b>\n\n"
+                msg += f"<b>Varlık:</b> {sig['ticker']}\n"
+                msg += f"<b>Yön:</b> {sig['direction']}\n"
+                msg += f"<b>Giriş (Net):</b> {sig['entry_price']:.4f}\n"
+                msg += f"<b>SL:</b> {sig['sl_price']:.4f} | <b>TP:</b> {sig['tp_price']:.4f}\n"
+                msg += f"<b>Önerilen Büyüklük:</b> {sig['position_size']:.4f} Lot/Kontrat\n"
+                msg += f"<i>(Kayma/Slippage Mal.: {sig['slippage']:.5f})</i>"
+                nt.send_telegram_message(msg)
+
+    # 5. Hafıza Temizliği (Garbage Collection)
+    del universe_mtf
+    del processed_mtf
     gc.collect()
-    logger.info("=== Live Cycle Complete ===")
+    log_info("✅ Döngü başarıyla tamamlandı, hafıza temizlendi.")
 
-async def daily_heartbeat():
-    from paper_db import paper_db
-    open_pos = len(paper_db.get_open_trades())
-    bal = await broker.get_account_balance()
-    await notifier.send_message(f"🌅 Günlük Durum RaporuSistem Aktif.Açık Pozisyon: {open_pos}Güncel Bakiye: ${bal:.2f}")
+# --- ORKESTRASYON VE ZAMANLAYICI (Main Scheduler Loop) ---
+def run_scheduler_loop():
+    """
+    Sistemin ana döngüsü. Python 'schedule' kütüphanesi kullanarak görevleri zamanlar.
+    Asenkron asyncio event loop'unu bloklamadan, while döngüsünü işletir.
+    DİKKAT: Memory leak önlemek için asyncio görevleri create_task ile eklenir.
+    """
+    log_info("🚀 ED Capital Quant Engine Başlatılıyor...")
 
-async def main():
-    # Initial ML Training
-    asyncio.create_task(train_ml_model())
+    # Telegram Bot Başlat (Non-Blocking)
+    app = nt.start_telegram_listener()
+    if app:
+        # v20+ async lifecycle
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(app.initialize())
+        loop.run_until_complete(app.start())
+        loop.run_until_complete(app.updater.start_polling())
+        log_info("✅ Telegram Çift Yönlü İletişim (Webhook/Polling) Aktif.")
+        nt.send_telegram_message("🚀 <b>ED Capital Quant Engine</b> Otonom Moda Geçti.\nKasa, ML Modelleri ve Algoritmalar hazır.")
 
-    # Scheduled ML Training (Weekly on Saturday)
-    schedule.every().saturday.at("02:00").do(lambda: asyncio.create_task(train_ml_model()))
-    await notifier.start()
-    await notifier.send_message("🚀 ED Capital Quant Engine Canlı Paper Trade Modunda Başlatıldı.")
+    # Zamanlanmış Görevler
+    schedule.every().day.at("08:00").do(daily_heartbeat)
+    schedule.every().sunday.at("02:00").do(retrain_ml_models) # Hafta sonu ML Eğitimi
+    schedule.every().friday.at("23:30").do(weekly_report)     # Cuma kapanış raporu
 
-    await run_live_cycle()
+    # Ana Tarama Döngüsü: Kesin Mum Kapanışı (Candle-Close Synchronization)
+    # Her saatin ilk dakikasında çalışır (Örn 14:01).
+    # Bu, yfinance'in API verisini işlemesi için 1 dakika toleranstır.
+    schedule.every().hour.at(":01").do(lambda: asyncio.create_task(execute_trading_cycle()))
 
-    schedule.every().hour.at(":01").do(lambda: asyncio.create_task(run_live_cycle()))
-    schedule.every().day.at("08:00").do(lambda: asyncio.create_task(daily_heartbeat()))
+    log_info("⏳ Zamanlayıcı (Scheduler) dinleme modunda. Sistemin saat başına ulaşması bekleniyor...")
 
-    while True:
-        schedule.run_pending()
-        await asyncio.sleep(1)
+    try:
+        loop = asyncio.get_event_loop()
+        # Non-blocking sonsuz döngü
+        async def main_loop():
+            while True:
+                # Kullanıcı /tara komutu verdiyse anında çalıştır
+                if nt.FORCE_SCAN:
+                    log_info("Kullanıcı Tetiklemesi: Anlık Tarama yapılıyor...")
+                    await execute_trading_cycle()
+                    nt.FORCE_SCAN = False
+
+                schedule.run_pending()
+                await asyncio.sleep(1) # CPU Dostu uyku
+
+        loop.run_until_complete(main_loop())
+    except KeyboardInterrupt:
+        log_info("🛑 Kullanıcı (veya Systemd) tarafından kapatıldı. Güvenli çıkış yapılıyor...")
+    except Exception as e:
+        log_critical(f"FATAL ERROR (Ana Döngü Çöktü): {e}")
+        nt.send_telegram_message("❌ <b>SİSTEM ÇÖKTÜ (FATAL ERROR)</b>\nAna döngü durdu. Acil müdahale gerekiyor!")
+    finally:
+        if app:
+            # Graceful shutdown for telegram app
+            loop.run_until_complete(app.updater.stop())
+            loop.run_until_complete(app.stop())
+            loop.run_until_complete(app.shutdown())
 
 if __name__ == "__main__":
-    try:
-        logger.info("Starting Quant Engine...")
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Shutting down manually.")
-    except Exception as e:
-        logger.critical(f"Fatal System Crash: {e}", exc_info=True)
-async def train_ml_model():
-    logger.info("Starting scheduled ML Model Training...")
-    try:
-        from data_loader import fetch_mtf_data
-        from features import add_features
-        from ml_validator import ml_validator
+    # Windows/WSL için event loop policy ayarı
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-        # Train on a highly liquid asset for general signal validation
-        df = await fetch_mtf_data("GC=F")
-        if not df.empty:
-            df_feat = add_features(df)
-            # Run model fitting in thread to avoid blocking
-            import asyncio
-            await asyncio.to_thread(ml_validator.train, df_feat)
-    except Exception as e:
-        logger.error(f"Error during ML training: {e}")
-
-# Append to schedule in main loop (will need to manually insert into main() later, so we just add the function here)
+    run_scheduler_loop()

@@ -1,7 +1,46 @@
+# Security & Config
 .env
+secret.key
+
+# Python
 __pycache__/
-*.pyc
-logs/
-models/
-paper_db.sqlite3
-.vscode/\n
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+.venv/
+ENV/
+
+# VS Code
+.vscode/
+
+# Project Specific
+data/*.sqlite3
+data/*.db
+logs/*.log
+models/*.pkl
+models/*.joblib
+reports/*.pdf
+reports/*.html
+
+# Jupyter
+.ipynb_checkpoints

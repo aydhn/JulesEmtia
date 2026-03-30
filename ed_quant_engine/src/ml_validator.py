@@ -4,90 +4,90 @@ import os
 import joblib
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from src.logger import get_logger
+from .config import MODEL_DIR, ML_CONFIDENCE_THRESHOLD
+from .logger import log_info, log_error, log_warning
 
-logger = get_logger("ml_validator")
-MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "rf_validator.joblib")
-os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+def create_labels(df: pd.DataFrame, target_return: float = 0.02, stop_loss: float = 0.01, window: int = 10) -> pd.DataFrame:
+    """
+    Hedef Etiket (Label) oluşturur. Bir mum sonrasında fiyat, stop_loss'a çarpmadan
+    target_return hedefine N mum (window) içinde ulaşmışsa başarılı (1), aksi halde (0).
+    Lookahead Bias olmaması için geleceğe bakan '.shift(-n)' kullanılır.
+    Bu veriler sadece EĞİTİM için kullanılır, SİNYAL ÜRETİMİNDE KULLANILMAZ.
+    """
+    df = df.copy()
 
-def create_labels(df: pd.DataFrame, forward_period: int = 12) -> pd.DataFrame:
-    """Creates binary labels indicating if a trade would be successful within N future periods."""
-    if df.empty: return df
+    # İleriye dönük maksimum getiri ve maksimum düşüşü hesapla
+    future_high = df['High'].rolling(window=window).max().shift(-window)
+    future_low = df['Low'].rolling(window=window).min().shift(-window)
 
-    df_labels = df.copy()
+    # 1: Başarılı Trade (TP'ye değdi ve öncesinde SL'ye değmedi)
+    # Basit bir simülasyon
+    df['Label'] = np.where(
+        (future_high > df['Close'] * (1 + target_return)) &
+        (future_low > df['Close'] * (1 - stop_loss)),
+        1, 0
+    )
 
-    # Look ahead strictly for training labels (NEVER used in inference)
-    df_labels['Future_Return'] = df_labels['Close'].shift(-forward_period) / df_labels['Close'] - 1.0
+    # NaN olan son window kadar satırı sil (Geleceği bilemeyiz)
+    df.dropna(subset=['Label'], inplace=True)
+    return df
 
-    # Label 1 if return > ATR threshold (approximate success), else 0
-    # A robust implementation would simulate actual SL/TP hits row-by-row.
-    df_labels['Target'] = np.where(df_labels['Future_Return'] > 0.005, 1, 0)
+def train_and_save_model(ticker: str, df: pd.DataFrame):
+    """
+    Yerel (Local CPU) bir Makine Öğrenmesi (Random Forest) modeli eğitir ve
+    modeller klasörüne kaydeder. Otonom olarak hafta sonları çalıştırılabilir.
+    """
+    log_info(f"[{ticker}] Makine Öğrenmesi Modeli Eğitiliyor...")
 
-    # Drop rows where we can't look ahead yet
-    df_labels.dropna(subset=['Target'], inplace=True)
-    return df_labels
+    # Özellikler (Features - X)
+    features = [c for c in df.columns if 'HTF_' in c or c in ['RSI_14', 'MACD_12_26_9', 'Returns', 'BBL_20_2.0', 'BBU_20_2.0', 'ATRr_14']]
 
-def train_model(df_features: pd.DataFrame) -> bool:
-    """Trains a Random Forest classifier to predict trade success."""
-    try:
-        df = create_labels(df_features)
+    df_labeled = create_labels(df)
 
-        # Features to use
-        features = ['RSI_14', 'MACD', 'MACD_Hist', 'ATR_14', 'Log_Return', 'Pct_Change']
+    if len(df_labeled) < 500: # Veri yetersiz
+        log_warning(f"[{ticker}] Yetersiz veri ({len(df_labeled)} satır), model eğitilmedi.")
+        return
 
-        X = df[features].dropna()
-        y = df.loc[X.index, 'Target']
+    X = df_labeled[features].dropna()
+    y = df_labeled.loc[X.index, 'Label']
 
-        if len(X) < 500:
-            logger.warning("Insufficient data to train ML model (<500 samples).")
-            return False
+    # Train-Test Split (Sıralı olmalı, zaman serisi karıştırılamaz)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False) # Important: Time-series split (no shuffle)
+    model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
+    model.fit(X_train, y_train)
 
-        # Train RF
-        clf = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=-1)
-        clf.fit(X_train, y_train)
+    accuracy = model.score(X_test, y_test)
+    log_info(f"[{ticker}] Model Eğitildi. Doğruluk (Accuracy): {accuracy:.2f}")
 
-        score = clf.score(X_test, y_test)
-        logger.info(f"ML Model trained successfully. Test Accuracy: {score:.2f}")
+    # Kaydet
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    joblib.dump(model, os.path.join(MODEL_DIR, f"{ticker}_rf_model.pkl"))
 
-        # Save model
-        joblib.dump(clf, MODEL_PATH)
-        return True
-
-    except Exception as e:
-        logger.error(f"Error training ML model: {e}")
+def check_ml_veto(ticker: str, current_features: pd.Series) -> bool:
+    """
+    Sinyal geldiğinde, makine öğrenmesi modelinden tahmin alır.
+    Eğer başarı ihtimali belirlenen eşiğin (örn %60) altındaysa sinyali reddeder (Veto).
+    """
+    model_path = os.path.join(MODEL_DIR, f"{ticker}_rf_model.pkl")
+    if not os.path.exists(model_path):
+        log_warning(f"[{ticker}] ML Modeli bulunamadı, Veto Atlandı.")
         return False
 
-def check_ml_veto(features_dict: dict, threshold: float = 0.60) -> bool:
-    """Returns True if the ML model predicts a low probability of success (<60%)."""
-    if not os.path.exists(MODEL_PATH):
-        logger.warning("ML Model not found. Skipping validation.")
-        return False # Fail open if no model
+    model = joblib.load(model_path)
 
+    # İlgili özellikleri seç
+    feature_names = model.feature_names_in_
     try:
-        clf = joblib.load(MODEL_PATH)
+        X = current_features[feature_names].to_frame().T
+        prob = model.predict_proba(X)[0][1] # Sınıf 1 (Başarı) ihtimali
 
-        # Order must match training features
-        X_infer = pd.DataFrame([{
-            'RSI_14': features_dict.get('RSI_14', 50),
-            'MACD': features_dict.get('MACD', 0),
-            'MACD_Hist': features_dict.get('MACD_Hist', 0),
-            'ATR_14': features_dict.get('ATR_14', 0),
-            'Log_Return': features_dict.get('Log_Return', 0),
-            'Pct_Change': features_dict.get('Pct_Change', 0)
-        }])
-
-        # Get probability of class 1 (Success)
-        prob_success = clf.predict_proba(X_infer)[0][1]
-
-        if prob_success < threshold:
-            logger.info(f"ML Veto: Trade probability {prob_success:.2f} < {threshold:.2f} threshold.")
+        if prob < ML_CONFIDENCE_THRESHOLD:
+            log_warning(f"🚨 ML VETOSU: [{ticker}] Başarı İhtimali %{prob*100:.1f} (Eşik: %{ML_CONFIDENCE_THRESHOLD*100}). Sinyal Reddedildi.")
             return True
-
-        logger.debug(f"ML Approved trade. Probability: {prob_success:.2f}")
-        return False
-
+        else:
+            log_info(f"✅ ML ONAYI: [{ticker}] Başarı İhtimali %{prob*100:.1f} ile onaylandı.")
+            return False
     except Exception as e:
-        logger.error(f"Error during ML inference: {e}")
+        log_error(f"[{ticker}] ML Tahmin Hatası: {e}")
         return False

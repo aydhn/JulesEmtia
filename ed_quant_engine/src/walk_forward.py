@@ -1,53 +1,96 @@
 import pandas as pd
 import numpy as np
-from src.logger import get_logger
-from src.backtester import vectorized_backtest
+from typing import List, Dict, Tuple
+from .backtester import run_vectorized_backtest
+from .logger import log_info, log_error, log_warning
 
-logger = get_logger("walk_forward")
+def walk_forward_optimization(df: pd.DataFrame, direction: str, is_window: int = 2000, oos_window: int = 500) -> Dict:
+    """
+    ED Capital Standartlarında Walk-Forward Optimization (WFO) Motoru.
+    Geçmiş verileri yuvarlanan pencerelere (Rolling Windows) böler:
+    - In-Sample (IS): Optimizasyon yapılan eğitim seti (Örn: 2000 saatlik mum).
+    - Out-of-Sample (OOS): Modelin test edildiği görülmemiş set (Örn: 500 saatlik mum).
 
-def walk_forward_optimization(df: pd.DataFrame, train_size: int = 500, test_size: int = 100) -> pd.DataFrame:
-    """Performs an out-of-sample Walk-Forward Optimization to detect curve-fitting."""
+    Amacı: Stratejinin aşırı uymasını (Overfitting) test etmek ve Walk-Forward Efficiency (WFE) ölçmek.
+    """
+    if df is None or len(df) < (is_window + oos_window):
+        log_error("WFO için yeterli veri yok.")
+        return {}
+
+    log_info(f"Walk-Forward Optimization Başladı ({direction} Yönlü)...")
+
+    # Strateji Parametre Uzayı (Grid) - CPU Dostu olması için dar tutulmuştur.
+    # Örn: (sl_multiplier, tp_multiplier)
+    param_grid = [
+        (1.0, 2.0),
+        (1.5, 3.0),
+        (2.0, 4.0),
+        (1.5, 2.0)
+    ]
+
+    total_length = len(df)
     results = []
 
-    if len(df) < (train_size + test_size):
-        logger.warning("Dataset too small for walk-forward optimization.")
-        return pd.DataFrame()
+    # Pencereyi Kaydırma (Walk Forward)
+    start_idx = 0
+    while start_idx + is_window + oos_window <= total_length:
+        is_df = df.iloc[start_idx : start_idx + is_window]
+        oos_df = df.iloc[start_idx + is_window : start_idx + is_window + oos_window]
 
-    for start in range(0, len(df) - train_size - test_size, test_size):
-        train_end = start + train_size
-        test_end = train_end + test_size
+        # In-Sample Optimizasyonu
+        best_is_pnl = -float('inf')
+        best_params = None
 
-        df_train = df.iloc[start:train_end]
-        df_test = df.iloc[train_end:test_end]
+        for params in param_grid:
+            sl_mult, tp_mult = params
+            res = run_vectorized_backtest(is_df, direction, sl_mult, tp_mult)
+            if res['NetPnL'] > best_is_pnl:
+                best_is_pnl = res['NetPnL']
+                best_params = params
 
-        # Here we would normally optimize parameters on df_train.
-        # Since our parameters are mostly static by design, we just run the backtest
-        # on IS (In-Sample) and OOS (Out-Of-Sample) to calculate Efficiency.
+        # Bulunan en iyi IS parametreleriyle OOS testi yap
+        if best_params:
+            sl_mult, tp_mult = best_params
+            oos_res = run_vectorized_backtest(oos_df, direction, sl_mult, tp_mult)
 
-        res_is = vectorized_backtest(df_train)
-        res_oos = vectorized_backtest(df_test)
+            # Yıllıklandırma veya oranlama
+            is_annualized_pnl = (best_is_pnl / is_window) * 8760 # Varsayımsal saat
+            oos_annualized_pnl = (oos_res['NetPnL'] / oos_window) * 8760
 
-        is_ret = res_is.get("Total_Return", 0.0)
-        oos_ret = res_oos.get("Total_Return", 0.0)
+            # Walk-Forward Efficiency (WFE) Hesaplama
+            # Eğer IS Kârı > 0 ise hesapla
+            if is_annualized_pnl > 0:
+                wfe = (oos_annualized_pnl / is_annualized_pnl) * 100
+            else:
+                wfe = 0
 
-        # Walk Forward Efficiency (WFE)
-        # Annualized OOS / Annualized IS
-        # For simplicity, we just use raw returns over the period
-        wfe = (oos_ret / is_ret) if is_ret > 0 else 0.0
+            results.append({
+                "IS_Start": is_df.index[0],
+                "OOS_End": oos_df.index[-1],
+                "Best_Params": best_params,
+                "IS_PnL": best_is_pnl,
+                "OOS_PnL": oos_res['NetPnL'],
+                "WFE_Pct": wfe
+            })
 
-        results.append({
-            "Start_Idx": start,
-            "IS_Return": is_ret,
-            "OOS_Return": oos_ret,
-            "WFE": wfe,
-            "Robust": wfe > 0.50 # WFE > 50% means the model is somewhat robust
-        })
+        start_idx += oos_window
 
+    if not results:
+        return {}
+
+    # Genel Değerlendirme
     df_results = pd.DataFrame(results)
-    avg_wfe = df_results['WFE'].mean()
+    avg_wfe = df_results['WFE_Pct'].mean()
 
-    logger.info(f"Walk-Forward Analysis complete. Average WFE: {avg_wfe:.2f}")
-    if avg_wfe < 0.50:
-        logger.critical(f"STRATEGY OVERFITTED! Walk-Forward Efficiency ({avg_wfe:.2f}) < 0.50")
+    log_info(f"WFO Tamamlandı. Ortalama Walk-Forward Efficiency (WFE): %{avg_wfe:.2f}")
 
-    return df_results
+    if avg_wfe < 50.0:
+        log_warning("🚨 WFO UYARISI: Ortalama WFE %50'nin altında. Strateji yüksek oranda OVERFITTED (Ezberlenmiş) olabilir!")
+    else:
+        log_info("✅ WFO ONAYI: Strateji sağlam görünüyor (Robust).")
+
+    return {
+        "Avg_WFE": avg_wfe,
+        "Total_Periods": len(results),
+        "Details": results
+    }

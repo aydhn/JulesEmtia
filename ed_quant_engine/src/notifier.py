@@ -1,149 +1,142 @@
 import os
-import asyncio
-import traceback
 import requests
-from dotenv import load_dotenv
-from typing import Optional
-
+import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from .config import TELEGRAM_TOKEN, ADMIN_CHAT_ID
+from .logger import log_info, log_error, log_warning
+from .paper_db import get_account_balance, get_open_trades
+from .reporter import generate_tear_sheet
 
-from src.logger import get_logger
+def send_telegram_message(message: str):
+    """
+    Sıfır Maliyetli / Standart Telegram Bildirimi (Senkron).
+    Acil durumlar ve tek yönlü bildirimler için.
+    """
+    if TELEGRAM_TOKEN == "your_token_here" or not TELEGRAM_TOKEN:
+        log_warning("Telegram Token yok, mesaj konsola basılıyor: " + message)
+        return
 
-load_dotenv()
-logger = get_logger("notifier")
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": ADMIN_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML"
+    }
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID")
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code != 200:
+            log_error(f"Telegram Gönderim Hatası: {response.text}")
+    except Exception as e:
+        log_error(f"Telegram Bağlantı Hatası: {e}")
 
-# Global State Flags for Commands
-global_state = {
-    "is_paused": False,
-    "force_scan": False
-}
+async def send_document(file_path: str, caption: str = ""):
+    """
+    Tear Sheet / Rapor dosyasını PDF veya HTML olarak asenkron gönderir.
+    """
+    if not os.path.exists(file_path) or TELEGRAM_TOKEN == "your_token_here":
+        return
 
-def is_admin(update: Update) -> bool:
-    """Security check to ensure only the admin can run commands."""
-    user_id = str(update.message.chat_id)
-    if user_id != ADMIN_CHAT_ID:
-        logger.critical(f"Unauthorized access attempt by ID: {user_id}")
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
+    try:
+        with open(file_path, "rb") as f:
+            files = {"document": f}
+            data = {"chat_id": ADMIN_CHAT_ID, "caption": caption}
+            response = requests.post(url, files=files, data=data, timeout=30)
+            if response.status_code != 200:
+                log_error(f"Belge Gönderim Hatası: {response.text}")
+    except Exception as e:
+        log_error(f"Belge Gönderim Bağlantı Hatası: {e}")
+
+# --- ÇİFT YÖNLÜ İLETİŞİM (Two-Way Communication) ---
+# Global State Kontrolü için main.py tarafından dinlenecek değişkenler
+SYSTEM_PAUSED = False
+FORCE_SCAN = False
+PANIC_CLOSE = False
+
+async def _check_auth(update: Update) -> bool:
+    """Yalnızca ADMIN_CHAT_ID ile komutları kabul et (Katı Güvenlik)."""
+    user_id = str(update.effective_chat.id)
+    if user_id != str(ADMIN_CHAT_ID):
+        log_critical(f"YETKİSİZ ERİŞİM DENEMESİ! ID: {user_id}")
         return False
     return True
 
 async def cmd_durum(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
-    from src.broker import PaperBroker
-    broker = PaperBroker()
-    bal = broker.get_account_balance()
-    open_pos = broker.get_open_positions()
-    msg = f"📊 <b>Durum Raporu</b>\n\n<b>Bakiye:</b> ${bal:,.2f}\n<b>Açık Pozisyon:</b> {len(open_pos)}\n<b>Duraklatıldı:</b> {'Evet' if global_state['is_paused'] else 'Hayır'}"
-    await update.message.reply_html(msg)
+    if not await _check_auth(update): return
+    balance = get_account_balance()
+    trades = get_open_trades()
+
+    msg = f"📊 <b>GÜNCEL DURUM</b>\n\n"
+    msg += f"Kasa: <b>${balance:,.2f}</b>\n"
+    msg += f"Açık Pozisyon: {len(trades)}\n"
+    msg += f"Sistem Duraklatıldı: {'Evet 🔴' if SYSTEM_PAUSED else 'Hayır 🟢'}\n\n"
+
+    for t in trades:
+        msg += f"• <b>{t['ticker']}</b> | {t['direction']} | Giriş: {t['entry_price']:.4f}\n"
+
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 async def cmd_durdur(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
-    global_state["is_paused"] = True
-    await update.message.reply_html("⏸️ <b>Sistem Durduruldu.</b> Yeni pozisyon açılmayacak, ancak açık pozisyonlar (Trailing Stop vb.) takip edilmeye devam edecek.")
+    global SYSTEM_PAUSED
+    if not await _check_auth(update): return
+    SYSTEM_PAUSED = True
+    msg = "🔴 <b>SİSTEM DURDURULDU!</b>\nYeni sinyal taraması askıya alındı. Açık pozisyonların koruması (İzleyen Stop vb.) DEVAM EDİYOR."
+    log_warning("Kullanıcı müdahalesi: Sistem duraklatıldı.")
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 async def cmd_devam(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
-    global_state["is_paused"] = False
-    await update.message.reply_html("▶️ <b>Sistem Devam Ediyor.</b> Tam otonom tarama modu aktif.")
+    global SYSTEM_PAUSED
+    if not await _check_auth(update): return
+    SYSTEM_PAUSED = False
+    msg = "🟢 <b>SİSTEM DEVAM EDİYOR!</b>\nOtonom tarama modu tekrar aktifleştirildi."
+    log_info("Kullanıcı müdahalesi: Sistem devam ediyor.")
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 async def cmd_kapat_hepsi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
-    from src.broker import PaperBroker
-    from src.execution_model import apply_execution_costs
-    import yfinance as yf
-
-    broker = PaperBroker()
-    open_pos = broker.get_open_positions()
-
-    if not open_pos:
-        await update.message.reply_html("Kapatılacak açık pozisyon yok.")
-        return
-
-    await update.message.reply_html("🚨 <b>Panik Modu:</b> Tüm pozisyonlar piyasa fiyatından kapatılıyor...")
-
-    closed_count = 0
-    for p in open_pos:
-        ticker = p['ticker']
-        try:
-            curr_price = yf.download(ticker, period="1d", interval="1m", progress=False)['Close'].iloc[-1]
-            exit_price = apply_execution_costs(ticker, "Close", curr_price, 0.0, 0.0)
-
-            pnl = (exit_price - p['entry_price']) * p['position_size'] if p['direction'] == "Long" else (p['entry_price'] - exit_price) * p['position_size']
-            broker.close_position(p['trade_id'], exit_price, pnl, "Panic Close")
-            closed_count += 1
-        except Exception as e:
-            logger.error(f"Failed to panic close {ticker}: {e}")
-
-    await update.message.reply_html(f"✅ <b>İşlem Tamamlandı.</b> {closed_count} adet pozisyon kapatıldı.")
+    global PANIC_CLOSE
+    if not await _check_auth(update): return
+    PANIC_CLOSE = True
+    msg = "🚨 <b>PANİK BUTONU!</b>\nTüm açık pozisyonlar acilen kapatılıyor..."
+    log_critical("Kullanıcı müdahalesi: PANİK KAPATMASI (Kapat Hepsi) tetiklendi!")
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 async def cmd_tara(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
-    global_state["force_scan"] = True
-    await update.message.reply_html("🔍 <b>Zorunlu Tarama (Force Scan) tetiklendi.</b> Bir sonraki döngüde tarama derhal başlatılacak.")
+    global FORCE_SCAN
+    if not await _check_auth(update): return
+    FORCE_SCAN = True
+    msg = "🔎 <b>ANLIK TARAMA İSTENDİ!</b>\nZamanlayıcı beklenmeden tüm evren şimdi taranıyor..."
+    log_info("Kullanıcı müdahalesi: Anlık tarama tetiklendi.")
+    await update.message.reply_text(msg, parse_mode="HTML")
 
-async def start_telegram_listener():
-    """Starts the python-telegram-bot application in non-blocking mode."""
-    if not BOT_TOKEN or not ADMIN_CHAT_ID:
-        logger.warning("Telegram credentials missing. Listener not started.")
-        return
+async def cmd_rapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_auth(update): return
+    msg = "📄 Kurumsal Performans Raporu (Tear Sheet) hazırlanıyor, lütfen bekleyin..."
+    await update.message.reply_text(msg)
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    file_path = generate_tear_sheet()
+    if file_path:
+        await send_document(file_path, caption="ED Capital Yönetim Raporu")
+    else:
+        await update.message.reply_text("Rapor oluşturulamadı. Yeterli kapalı işlem olmayabilir.")
+
+def start_telegram_listener():
+    """
+    python-telegram-bot (v20+) ile çift yönlü dinleme servisini başlatır.
+    Senkron çağrıdır, kendi asyncio event loop'unu kurar, ancak biz bunu main.py
+    içinde arka planda çalıştıracağız (Application builder).
+    """
+    if TELEGRAM_TOKEN == "your_token_here":
+        return None
+
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("durum", cmd_durum))
     app.add_handler(CommandHandler("durdur", cmd_durdur))
     app.add_handler(CommandHandler("devam", cmd_devam))
     app.add_handler(CommandHandler("kapat_hepsi", cmd_kapat_hepsi))
     app.add_handler(CommandHandler("tara", cmd_tara))
+    app.add_handler(CommandHandler("rapor", cmd_rapor))
 
-    logger.info("Starting Telegram Command Listener...")
-
-    # Initialize and start the application gracefully without blocking the main event loop
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-
-# ---------------------------------------------------------
-# Outbound Message Methods
-# ---------------------------------------------------------
-
-def send_telegram_message_sync(message: str) -> bool:
-    """Synchronous Telegram message dispatch."""
-    if not BOT_TOKEN or not ADMIN_CHAT_ID:
-        return False
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": ADMIN_CHAT_ID, "text": message, "parse_mode": "HTML"}
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
-        return True
-    except Exception as e:
-        logger.error(f"Failed to send sync Telegram message: {e}")
-        return False
-
-async def send_telegram_message_async(message: str) -> bool:
-    return await asyncio.to_thread(send_telegram_message_sync, message)
-
-async def send_telegram_document_async(file_path: str, caption: str = "") -> bool:
-    if not BOT_TOKEN or not ADMIN_CHAT_ID: return False
-    def _send_doc():
-        try:
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
-            with open(file_path, "rb") as f:
-                files = {"document": f}
-                data = {"chat_id": ADMIN_CHAT_ID, "caption": caption}
-                response = requests.post(url, files=files, data=data, timeout=30)
-                response.raise_for_status()
-                return True
-        except Exception as e:
-            logger.error(f"Failed to send document: {e}")
-            return False
-    return await asyncio.to_thread(_send_doc)
-
-def notify_critical_error(e: Exception, context: str = ""):
-    tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-    msg = f"🚨 <b>CRITICAL ERROR</b> 🚨\n\n<b>Context:</b> {context}\n<b>Exception:</b> {str(e)}\n\n<pre>{tb[-500:]}</pre>"
-    logger.critical(f"Critical error in {context}: {e}")
-    send_telegram_message_sync(msg)
+    return app

@@ -1,125 +1,96 @@
 import pandas as pd
-from typing import Dict, Any, List
-from src.paper_db import get_open_trades, get_closed_trades
-from src.logger import get_logger
+import numpy as np
+from typing import Dict, List
+from .config import MAX_OPEN_POSITIONS, MAX_GLOBAL_RISK_PCT, CORRELATION_THRESHOLD
+from .logger import log_info, log_error, log_warning
 
-logger = get_logger("portfolio_manager")
+class PortfolioManager:
+    """
+    ED Capital Risk Yönetimi:
+    1. Tüm açık işlemlerin maksimum riskini (Global Exposure) denetler.
+    2. Dinamik korelasyon hesaplayarak aynı anda aynı yönlü yüksek korelasyonlu işlemleri reddeder.
+    """
 
-MAX_OPEN_POSITIONS = 4
-MAX_GLOBAL_RISK_PCT = 0.06 # Maximum 6% of total account balance at risk at any given time
-CORRELATION_THRESHOLD = 0.75
+    def __init__(self):
+        self.correlation_matrix = pd.DataFrame()
+        self.max_positions = MAX_OPEN_POSITIONS
+        self.max_risk_pct = MAX_GLOBAL_RISK_PCT
+        self.corr_threshold = CORRELATION_THRESHOLD
 
-def calculate_correlation_matrix(df_universe: Dict[str, pd.DataFrame], lookback: int = 60) -> pd.DataFrame:
-    """Calculates a rolling Pearson correlation matrix for the past N days."""
-    close_prices = {}
+    def update_correlation_matrix(self, universe_data: Dict[str, pd.DataFrame]):
+        """
+        Geçmiş 60 günlük kapanış verileri üzerinden yuvarlanan (rolling)
+        Pearson Korelasyon Matrisi oluşturur. (CPU/RAM dostu Pandas işlemi)
+        """
+        log_info("Dinamik Korelasyon Matrisi Güncelleniyor...")
+        try:
+            close_prices = {}
+            for ticker, data in universe_data.items():
+                df = data.get("1d")
+                if df is not None and not df.empty and "Close" in df.columns:
 
-    for ticker, df in df_universe.items():
-        if not df.empty and 'Close' in df.columns:
-            close_prices[ticker] = df['Close'].tail(lookback)
+                    # Sadece son 60 günlük kapanış fiyatları
+                    close_prices[ticker] = df['Close'].tail(60)
 
-    df_close = pd.DataFrame(close_prices)
-    df_close = df_close.ffill().bfill()
+            df_closes = pd.DataFrame(close_prices)
 
-    if df_close.empty:
-        return pd.DataFrame()
+            # Günlük % Değişimler üzerinden korelasyon (Fiyatlar yanıltıcıdır)
+            returns = df_closes.pct_change().dropna()
+            self.correlation_matrix = returns.corr(method='pearson')
+            log_info(f"Matris {len(returns)} varlık için güncellendi.")
 
-    return df_close.corr()
+        except Exception as e:
+            log_error(f"Korelasyon Matrisi Hatası: {e}")
 
-def check_correlation_veto(new_ticker: str, new_direction: str, corr_matrix: pd.DataFrame) -> bool:
-    """Vetoes a trade if it duplicates exposure with a highly correlated open position."""
-    if corr_matrix.empty or new_ticker not in corr_matrix.columns:
-        return False
+    def check_correlation_veto(self, new_ticker: str, new_direction: str, open_trades: List[dict]) -> bool:
+        """
+        Eğer yeni sinyal gelen varlık, halihazırda AÇIK olan bir varlık ile
+        belirlenen eşik üzerinde (>0.75) pozitif korelasyonluysa ve yönleri aynıysa (Long-Long)
+        veya yüksek negatif korelasyonlu ve yönleri zıtsa (Long-Short) VETO atar.
+        """
+        if self.correlation_matrix.empty or new_ticker not in self.correlation_matrix.columns:
+            return False
 
-    open_trades = get_open_trades()
-    if not open_trades:
-        return False
+        for trade in open_trades:
+            open_ticker = trade['ticker']
+            open_direction = trade['direction']
 
-    for trade in open_trades:
-        existing_ticker = trade['ticker']
-        existing_direction = trade['direction']
+            if open_ticker not in self.correlation_matrix.columns:
+                continue
 
-        if existing_ticker in corr_matrix.columns:
-            corr_val = corr_matrix.loc[new_ticker, existing_ticker]
+            corr_value = self.correlation_matrix.loc[new_ticker, open_ticker]
 
-            # If highly correlated (> 0.75) and same direction -> Risk Duplication Veto
-            if corr_val > CORRELATION_THRESHOLD and new_direction == existing_direction:
-                logger.info(f"Correlation Veto: {new_ticker} rejected. Highly correlated ({corr_val:.2f}) with open {existing_ticker} {existing_direction} position.")
+            # Risk Duplication: Altın Long varken Gümüş Long geldiğinde (Korelasyon > 0.75)
+            if corr_value > self.corr_threshold and new_direction == open_direction:
+                log_warning(f"🚨 KORELASYON VETOSU: {new_ticker} ({new_direction}) sinyali, {open_ticker} ({open_direction}) ile çok benzer hareket ediyor (Korelasyon: {corr_value:.2f}).")
                 return True
 
-            # If highly negatively correlated (< -0.75) and opposite direction -> Also Risk Duplication (Hedge but doubled exposure)
-            elif corr_val < -CORRELATION_THRESHOLD and new_direction != existing_direction:
-                logger.info(f"Negative Correlation Veto: {new_ticker} rejected. Doubling exposure against {existing_ticker}.")
+            # Ters Korelasyonlu Varlıkta Zıt İşlem: USDTRY Long varken EURUSD Short geldiğinde (-0.80 ise)
+            if corr_value < -self.corr_threshold and new_direction != open_direction:
+                log_warning(f"🚨 KORELASYON VETOSU: {new_ticker} ({new_direction}) sinyali, {open_ticker} ({open_direction}) ile ters korelasyonlu ({corr_value:.2f}). Risk katlanıyor!")
                 return True
 
-    return False
+        return False
 
-def calculate_kelly_fraction(b: float, p: float, q: float) -> float:
-    """Calculates the Kelly Criterion fraction f* = (bp - q) / b"""
-    if b <= 0: return 0.0
-    f_star = (b * p - q) / b
-    return max(0.0, f_star)
+    def check_exposure_limit(self, current_balance: float, new_risk_amount: float, open_trades: List[dict]) -> bool:
+        """
+        Açık işlemlerin toplam riskinin, Kasanın Maksimum Yüzdesini (Örn %6)
+        geçip geçmediğini ve pozisyon sayısı sınırını denetler.
+        """
+        if len(open_trades) >= self.max_positions:
+            log_warning(f"🚨 KAPASİTE DOLU VETOSU: Maksimum açık pozisyon sınırına ({self.max_positions}) ulaşıldı.")
+            return True
 
-def get_dynamic_position_size(ticker: str, account_balance: float, entry_price: float, sl_price: float) -> float:
-    """Calculates position size using Fractional Kelly Criterion and Stop-Loss distance."""
+        total_current_risk = sum(
+            abs(t['entry_price'] - t['sl_price']) * t['position_size']
+            for t in open_trades
+        )
 
-    # 1. Fetch historical performance for Kelly variables
-    closed_trades = get_closed_trades()
+        projected_total_risk = total_current_risk + new_risk_amount
+        max_allowed_risk = current_balance * self.max_risk_pct
 
-    p = 0.50 # Default win rate
-    b = 1.50 # Default reward/risk
+        if projected_total_risk > max_allowed_risk:
+            log_warning(f"🚨 GLOBAL RİSK VETOSU: Yeni işlemle risk ({projected_total_risk:.2f}$) limiti ({max_allowed_risk:.2f}$) aşıyor.")
+            return True
 
-    if len(closed_trades) > 10:
-        winning_trades = [t for t in closed_trades if t['pnl'] > 0]
-        losing_trades = [t for t in closed_trades if t['pnl'] < 0]
-
-        if len(winning_trades) > 0 and len(losing_trades) > 0:
-            p = len(winning_trades) / len(closed_trades)
-            avg_win = sum([t['pnl'] for t in winning_trades]) / len(winning_trades)
-            avg_loss = abs(sum([t['pnl'] for t in losing_trades]) / len(losing_trades))
-
-            if avg_loss > 0:
-                b = avg_win / avg_loss
-
-    q = 1.0 - p
-
-    # 2. Calculate Kelly
-    f_star = calculate_kelly_fraction(b, p, q)
-
-    # 3. Apply JP Morgan Risk Safety Buffer (Half-Kelly)
-    fractional_kelly = f_star / 2.0
-
-    # 4. Cap limits
-    max_risk_pct = 0.04 # Hard cap: Max 4% of account per trade
-    if fractional_kelly > max_risk_pct:
-        fractional_kelly = max_risk_pct
-    elif fractional_kelly <= 0:
-        fractional_kelly = 0.005 # Minimum 0.5% risk if Kelly suggests no trade (to keep system alive and learning)
-
-    # Calculate absolute risk amount
-    risk_amount = account_balance * fractional_kelly
-
-    # 5. Determine Position Size based on ATR/SL distance
-    sl_distance = abs(entry_price - sl_price)
-
-    if sl_distance == 0:
-        logger.error("Stop Loss distance is zero. Cannot calculate position size.")
-        return 0.0
-
-    lot_size = risk_amount / sl_distance
-
-    logger.debug(f"Kelly sizing for {ticker}: WinRate={p:.2f}, R/R={b:.2f}, Kelly={f_star:.3f}, Fraction={fractional_kelly:.3f}, Lot={lot_size:.4f}")
-
-    return lot_size
-
-def check_global_exposure(new_risk_pct: float) -> bool:
-    """Returns True if global portfolio limits are breached (VETO)."""
-    open_trades = get_open_trades()
-
-    if len(open_trades) >= MAX_OPEN_POSITIONS:
-        logger.info(f"Capacity Veto: Max open positions ({MAX_OPEN_POSITIONS}) reached.")
-        return True
-
-    # In a full system, you would sum the current dynamic risk of all open trades.
-    # For now, we enforce a simple count limit and Kelly handles individual caps.
-
-    return False
+        return False

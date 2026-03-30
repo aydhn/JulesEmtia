@@ -1,63 +1,68 @@
 import feedparser
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
-import nltk
-from src.logger import get_logger
+from .logger import log_info, log_warning, log_error
 
-logger = get_logger("sentiment_filter")
-
-# Download NLTK VADER lexicon if not present (handled once at startup)
 try:
-    nltk.data.find('sentiment/vader_lexicon')
+    sia = SentimentIntensityAnalyzer()
 except LookupError:
+    import nltk
     nltk.download('vader_lexicon')
+    sia = SentimentIntensityAnalyzer()
 
-sia = SentimentIntensityAnalyzer()
-
-# Free RSS feeds for financial news
+# SIFIR BÜTÇE RSS Feed URL'leri
 RSS_FEEDS = [
-    "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664", # Finance
-    "https://feeds.a.dj.com/rss/RSSMarketsMain.xml", # WSJ Markets
+    "https://feeds.finance.yahoo.com/rss/2.0/headline?s=GC=F,CL=F,USDTRY=X",
+    "https://www.investing.com/rss/news_285.rss" # Emtia
 ]
 
-def analyze_sentiment(query: str = "") -> float:
-    """Fetches RSS news and returns an aggregated sentiment compound score (-1.0 to 1.0)."""
-    compound_scores = []
+def fetch_rss_sentiment(keyword: str) -> float:
+    """
+    Belirlenen anahtar kelime (Altın, Oil vs.) ile RSS'den haberleri çeker ve
+    VADER Sentiment Analysis ile compound (karma) duyarlılık skorunu döner.
+    (-1.0 En Negatif, +1.0 En Pozitif)
+    """
+    total_score = 0.0
+    count = 0
 
     for url in RSS_FEEDS:
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:20]: # Parse latest 20 news items
-                text = f"{entry.title} {entry.summary if 'summary' in entry else ''}"
-                if query.lower() in text.lower() or query == "":
-                    score = sia.polarity_scores(text)['compound']
-                    compound_scores.append(score)
+            for entry in feed.entries:
+                if keyword.lower() in entry.title.lower() or keyword.lower() in entry.summary.lower():
+                    sentiment = sia.polarity_scores(entry.title)
+                    total_score += sentiment['compound']
+                    count += 1
         except Exception as e:
-            logger.error(f"RSS Parsing error from {url}: {e}")
+            log_error(f"RSS Hatası ({url}): {e}")
 
-    if not compound_scores:
-        return 0.0 # Neutral if no relevant news found
+    if count == 0:
+        return 0.0
 
-    avg_score = sum(compound_scores) / len(compound_scores)
+    avg_score = total_score / count
+    log_info(f"[{keyword}] NLP Duyarlılık Skoru (Sentiment): {avg_score:.2f} ({count} haber incelendi)")
     return avg_score
 
-def check_sentiment_veto(ticker: str, signal: str) -> bool:
-    """Returns True if news sentiment strongly contradicts the technical signal."""
-    # Mapping tickers to basic search keywords
-    kw_map = {
-        "GC=F": "gold", "SI=F": "silver", "CL=F": "oil", "USDTRY=X": "turkey", "EURTRY=X": "europe"
-    }
+def check_sentiment_veto(ticker: str, direction: str, threshold: float = -0.50) -> bool:
+    """
+    Eğer teknik gösterge Long (Al) diyor, ancak haber duyarlılığı felaket negatifse
+    (-0.50'den küçükse) vetoyu basar (True döner).
+    """
+    # Basit anahtar kelime haritalaması
+    keyword = "Market"
+    if "GC=F" in ticker: keyword = "Gold"
+    elif "CL=F" in ticker: keyword = "Oil"
+    elif "TRY" in ticker: keyword = "Lira"
 
-    keyword = kw_map.get(ticker, "economy")
-    score = analyze_sentiment(keyword)
+    sentiment_score = fetch_rss_sentiment(keyword)
 
-    # If technicals say Buy, but news is extremely negative
-    if signal == "Long" and score < -0.40:
-        logger.info(f"Sentiment Veto: Rejected {signal} for {ticker}. Score: {score:.2f}")
+    # Haberler felaket kötüyken ALIM (Long) yapma
+    if direction == "Long" and sentiment_score < threshold:
+        log_warning(f"🚨 SENTIMENT VETOSU: [{ticker}] Haberler {keyword} için felaket negatif. ({sentiment_score:.2f})")
         return True
 
-    # If technicals say Sell, but news is extremely positive
-    if signal == "Short" and score > 0.40:
-        logger.info(f"Sentiment Veto: Rejected {signal} for {ticker}. Score: {score:.2f}")
+    # Haberler harikayken SATIŞ (Short) yapma
+    if direction == "Short" and sentiment_score > abs(threshold):
+        log_warning(f"🚨 SENTIMENT VETOSU: [{ticker}] Haberler {keyword} için çok olumlu. ({sentiment_score:.2f})")
         return True
 
     return False
