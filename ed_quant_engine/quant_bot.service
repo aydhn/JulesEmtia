@@ -1,15 +1,15 @@
 [Unit]
-Description=ED Capital Quant Engine Daemon
-After=network.target
+Description=ED Capital Quant Engine
+After=docker.service
+Requires=docker.service
 
 [Service]
-Type=simple
-User=root
+Type=oneshot
+RemainAfterExit=yes
 WorkingDirectory=/opt/ed_quant_engine
-ExecStart=/usr/local/bin/docker-compose up
+ExecStart=/usr/local/bin/docker-compose up -d --build
 ExecStop=/usr/local/bin/docker-compose down
-Restart=always
-RestartSec=5
+TimeoutStartSec=0
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=multi-user.target\n

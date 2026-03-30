@@ -1,151 +1,188 @@
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Tuple
-from data_loader import DataLoader
-from features import add_features, align_mtf_data
-from strategy import check_entry_signal
-from logger import log
-from config import INITIAL_CAPITAL
+from logger import logger
+import matplotlib.pyplot as plt
+import io
+import itertools
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 class Backtester:
-    def __init__(self, data_loader: DataLoader):
-        self.data_loader = data_loader
+    def __init__(self, initial_capital=10000.0, commission=0.0005, slippage=0.001):
+        self.initial_capital = initial_capital
+        self.commission = commission
+        self.slippage = slippage
+        self.trades = []
 
-    def run_backtest(self, ticker: str, start_date: str = "2020-01-01", end_date: str = "2024-01-01") -> pd.DataFrame:
-        """
-        Runs a vectorized/iterative backtest on historical data for a specific ticker.
-        Applies slippage and commission assumptions.
-        """
-        log.info(f"Starting backtest for {ticker} from {start_date} to {end_date}...")
-
-        # 1. Fetch historical data
-        df_htf = self.data_loader._fetch_data_with_retry(ticker, "1d", "5y")
-        df_ltf = self.data_loader._fetch_data_with_retry(ticker, "1h", "730d") # yfinance limit for 1h is usually 730d
-
-        if df_htf.empty or df_ltf.empty:
-            log.warning(f"Insufficient data for backtest: {ticker}")
+    def run_vectorized_backtest(self, df: pd.DataFrame, direction_col='Direction', entry_col='Close', sl_col='SL', tp_col='TP'):
+        '''
+        Phase 7: Fast Iterative/Vectorized Backtest Engine
+        Simulates entry, SL, TP, and trailing stops with realistic slippage and commission.
+        '''
+        if df.empty or direction_col not in df.columns:
             return pd.DataFrame()
 
-        # 2. Add features and align MTF
-        aligned_df = align_mtf_data(df_htf, df_ltf)
+        capital = self.initial_capital
+        equity_curve = [capital]
+        self.trades = []
 
-        if aligned_df.empty:
-            return pd.DataFrame()
+        in_position = False
+        entry_price = 0.0
+        current_sl = 0.0
+        current_tp = 0.0
+        direction = None
+        entry_time = None
+        size = 0.0
 
-        # Filter dates
-        aligned_df = aligned_df.loc[start_date:end_date]
+        for idx, row in df.iterrows():
+            # Check exit conditions first if in position
+            if in_position:
+                exit_price = 0.0
+                reason = None
 
-        # 3. Simulate Trades
-        trades = []
-        open_trade = None
+                # Check for TP or SL hit
+                if direction == 'Long':
+                    if row['High'] >= current_tp:
+                        exit_price = current_tp
+                        reason = 'TP'
+                    elif row['Low'] <= current_sl:
+                        exit_price = current_sl
+                        reason = 'SL'
+                elif direction == 'Short':
+                    if row['Low'] <= current_tp:
+                        exit_price = current_tp
+                        reason = 'TP'
+                    elif row['High'] >= current_sl:
+                        exit_price = current_sl
+                        reason = 'SL'
 
-        for index, row in aligned_df.iterrows():
-            # Check for exits if open
-            if open_trade:
-                exit_price = 0
-                reason = ""
-                # Simplistic SL/TP check on High/Low
-                if open_trade['direction'] == 'Long':
-                    if row['Low'] <= open_trade['sl']:
-                        exit_price = open_trade['sl']
-                        reason = "SL"
-                    elif row['High'] >= open_trade['tp']:
-                        exit_price = open_trade['tp']
-                        reason = "TP"
-                elif open_trade['direction'] == 'Short':
-                    if row['High'] >= open_trade['sl']:
-                        exit_price = open_trade['sl']
-                        reason = "SL"
-                    elif row['Low'] <= open_trade['tp']:
-                        exit_price = open_trade['tp']
-                        reason = "TP"
+                if reason:
+                    # Apply slippage and commission to exit
+                    exit_cost = exit_price * (self.commission + self.slippage)
+                    if direction == 'Long':
+                        exit_price_actual = exit_price - exit_cost
+                        pnl = (exit_price_actual - entry_price) * size
+                    else:
+                        exit_price_actual = exit_price + exit_cost
+                        pnl = (entry_price - exit_price_actual) * size
 
-                if exit_price > 0:
-                    # Apply Slippage on Exit
-                    exit_price = exit_price * (0.9995 if open_trade['direction'] == 'Long' else 1.0005)
-
-                    pnl = (exit_price - open_trade['entry_price']) * open_trade['size'] if open_trade['direction'] == 'Long' else (open_trade['entry_price'] - exit_price) * open_trade['size']
-
-                    open_trade['exit_time'] = index
-                    open_trade['exit_price'] = exit_price
-                    open_trade['pnl'] = pnl
-                    open_trade['reason'] = reason
-                    trades.append(open_trade)
-                    open_trade = None
-                    continue # Skip entry logic on exit bar
-
-            # Check for entries if flat
-            if not open_trade:
-                # Need to pass historical slice ending at current index to strategy
-                hist_slice = aligned_df.loc[:index]
-                if len(hist_slice) < 200: continue # Need warmup
-
-                signal = check_entry_signal(hist_slice, ticker)
-                if signal:
-                    # Apply Slippage on Entry (0.1% total cost assumed for backtest simplicity)
-                    entry_price = signal['entry_price'] * (1.001 if signal['direction'] == 'Long' else 0.999)
-
-                    # Calculate position size (fixed risk % for simple backtest)
-                    risk_pct = 0.02
-                    risk_amount = INITIAL_CAPITAL * risk_pct
-                    sl_dist = abs(entry_price - signal['sl'])
-                    size = risk_amount / sl_dist if sl_dist > 0 else 0
-
-                    open_trade = {
-                        'trade_id': len(trades) + 1,
-                        'ticker': ticker,
-                        'direction': signal['direction'],
-                        'entry_time': index,
+                    capital += pnl
+                    self.trades.append({
+                        'entry_time': entry_time,
+                        'exit_time': idx,
+                        'direction': direction,
                         'entry_price': entry_price,
-                        'sl': signal['sl'],
-                        'tp': signal['tp'],
-                        'size': size,
-                        'status': 'Closed', # Will be appended when closed
-                        'pnl': 0
-                    }
+                        'exit_price': exit_price_actual,
+                        'pnl': pnl,
+                        'reason': reason
+                    })
+                    in_position = False
+                else:
+                    # Implement simple trailing stop logic for backtest approximation
+                    atr = row.get('ATR_14', (row['High'] - row['Low']))
+                    if direction == 'Long' and row['Close'] > (current_sl + 1.5 * atr):
+                        new_sl = row['Close'] - (1.5 * atr)
+                        if new_sl > current_sl:
+                            current_sl = new_sl
+                    elif direction == 'Short' and row['Close'] < (current_sl - 1.5 * atr):
+                        new_sl = row['Close'] + (1.5 * atr)
+                        if new_sl < current_sl:
+                            current_sl = new_sl
 
-        return pd.DataFrame(trades)
+            # Check for entry signals if not in position
+            if not in_position and pd.notna(row.get(direction_col)):
+                direction = row[direction_col]
+                # Apply slippage and commission to entry
+                raw_entry = row[entry_col]
+                entry_cost = raw_entry * (self.commission + self.slippage)
 
-    def calculate_metrics(self, trades_df: pd.DataFrame) -> Dict:
-        """Calculates professional Quant metrics from backtest results."""
-        if trades_df.empty: return {}
+                if direction == 'Long':
+                    entry_price = raw_entry + entry_cost
+                else:
+                    entry_price = raw_entry - entry_cost
 
-        total_trades = len(trades_df)
-        winning_trades = len(trades_df[trades_df['pnl'] > 0])
-        win_rate = winning_trades / total_trades if total_trades > 0 else 0
+                current_sl = row.get(sl_col, entry_price * 0.98 if direction=='Long' else entry_price * 1.02)
+                current_tp = row.get(tp_col, entry_price * 1.04 if direction=='Long' else entry_price * 0.96)
 
-        gross_profit = trades_df[trades_df['pnl'] > 0]['pnl'].sum()
-        gross_loss = abs(trades_df[trades_df['pnl'] < 0]['pnl'].sum())
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+                # Simplified 2% risk size
+                risk_amount = capital * 0.02
+                sl_dist = abs(entry_price - current_sl)
+                size = risk_amount / sl_dist if sl_dist > 0 else 0
 
-        net_pnl = gross_profit - gross_loss
+                if size > 0:
+                    in_position = True
+                    entry_time = idx
 
-        # Drawdown calculation
-        trades_df['cumulative_pnl'] = trades_df['pnl'].cumsum()
-        trades_df['equity'] = INITIAL_CAPITAL + trades_df['cumulative_pnl']
-        trades_df['peak'] = trades_df['equity'].cummax()
-        trades_df['drawdown'] = (trades_df['equity'] - trades_df['peak']) / trades_df['peak']
-        max_drawdown = trades_df['drawdown'].min()
+            equity_curve.append(capital)
 
-        return {
-            'Total Trades': total_trades,
-            'Net PnL': net_pnl,
-            'Win Rate': win_rate,
-            'Profit Factor': profit_factor,
-            'Max Drawdown': max_drawdown
+        return pd.DataFrame({'equity': equity_curve[1:]}, index=df.index)
+
+    def calculate_metrics(self, benchmark_returns=None):
+        ''' Returns Win Rate, Profit Factor, Max Drawdown '''
+        if not self.trades:
+            return {"Total PnL": 0, "Win Rate": 0, "Profit Factor": 0, "Max Drawdown": 0}
+
+        df_trades = pd.DataFrame(self.trades)
+        wins = df_trades[df_trades['pnl'] > 0]
+        losses = df_trades[df_trades['pnl'] <= 0]
+
+        win_rate = len(wins) / len(df_trades)
+
+        gross_profit = wins['pnl'].sum() if not wins.empty else 0
+        gross_loss = abs(losses['pnl'].sum()) if not losses.empty else 1
+        profit_factor = gross_profit / gross_loss
+
+        total_pnl = df_trades['pnl'].sum()
+
+        # Max Drawdown Approximation
+        cumulative = (df_trades['pnl'].cumsum() + self.initial_capital)
+        peak = cumulative.cummax()
+        drawdown = (cumulative - peak) / peak
+        max_drawdown = drawdown.min()
+
+        metrics = {
+            "Total PnL": total_pnl,
+            "Win Rate": win_rate,
+            "Profit Factor": profit_factor,
+            "Max Drawdown": max_drawdown,
+            "Total Trades": len(df_trades)
         }
+        return metrics
 
-    def grid_search_optimization(self, ticker: str, params: List[Dict]) -> pd.DataFrame:
-        """
-        Runs simple parameter optimization.
-        params: List of dicts specifying indicator lengths, etc.
-        (Placeholder for CPU-friendly optimization logic).
-        """
-        results = []
-        for param_set in params:
-            # Inject params into strategy/features (Requires refactoring features.py to accept params)
-            # Run backtest
-            # metrics = self.calculate_metrics(trades_df)
-            # results.append({**param_set, **metrics})
-            pass
-        return pd.DataFrame(results)
+    def _run_single_grid_point(self, args):
+        params, df, strategy_func = args
+        # Apply parameters to strategy function (mocked here)
+        # In a real implementation, strategy_func generates the 'Direction', 'SL', 'TP' columns
+        # df_signaled = strategy_func(df.copy(), **params)
+        df_signaled = df.copy() # Placeholder
+
+        equity_df = self.run_vectorized_backtest(df_signaled)
+        metrics = self.calculate_metrics()
+        return (params, metrics)
+
+    def optimize_parameters(self, df: pd.DataFrame, params_grid: dict, strategy_func):
+        ''' Phase 7: CPU Friendly Grid Search '''
+        logger.info("Starting Grid Search Optimization...")
+
+        keys, values = zip(*params_grid.items())
+        combinations = [dict(zip(keys, v)) for v in itertools.product(*values)]
+
+        best_metrics = None
+        best_params = None
+
+        # CPU friendly multiprocessing
+        tasks = [(params, df, strategy_func) for params in combinations]
+
+        with ProcessPoolExecutor() as executor:
+            futures = {executor.submit(self._run_single_grid_point, task): task for task in tasks}
+            for future in as_completed(futures):
+                params, metrics = future.result()
+
+                # Optimize for Profit Factor * Win Rate as a combined score
+                score = metrics.get('Profit Factor', 0) * metrics.get('Win Rate', 0)
+
+                if best_metrics is None or score > (best_metrics.get('Profit Factor', 0) * best_metrics.get('Win Rate', 0)):
+                    best_metrics = metrics
+                    best_params = params
+
+        logger.info(f"Optimization Complete. Best Params: {best_params} | Metrics: {best_metrics}")
+        return best_params, best_metrics

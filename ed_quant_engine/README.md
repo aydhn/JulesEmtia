@@ -1,33 +1,39 @@
-# ED Capital Quant Engine
+# ED Capital Quant Engine 🚀
 
-A high-performance, low-frequency, zero-budget quantitative trading engine built in Python. Designed with the precision of a Senior Quant Developer, the risk management of a JP Morgan Fund Manager, and the ingenuity of Bill Benter.
+Kurumsal Düzey Algoritmik Ticaret ve Portföy Yönetim Motoru.
+Düşük Frekans, Yüksek İsabet Oranı, Katı Risk Yönetimi.
 
-## Features
-- **Zero Budget Ecosystem:** Uses exclusively free libraries (`yfinance`, `pandas_ta`, `scikit-learn`, `nltk`).
-- **Multi-Timeframe Analysis (MTF):** Filters entry signals (1H) against macro trends (1D) with strict zero lookahead bias checks using backward merging.
-- **Dynamic Risk Management:** Fractional Kelly Criterion position sizing, ATR-based trailing stops, and volatility-adjusted slippage.
-- **Circuit Breakers & Vetoes:**
-  - VIX Flash Crash Protection
-  - Dynamic Correlation Vetos
-  - Natural Language Processing (NLP) Sentiment Vetoes via RSS Feeds
-  - Random Forest ML Signal Validation
-- **Solid Architecture:** Fully containerized via Docker, local SQLite state management, and an Abstract Base Broker interface for future live integration.
-- **Two-Way Telegram Interface:** Real-time reporting, panic buttons, and autonomous heartbeat.
+## Özellikler
+- **MTF (Multi-Timeframe) Analizi:** Günlük trend, Saatlik giriş. (Sıfır Lookahead Bias)
+- **Dinamik Risk Yönetimi:** ATR tabanlı İzleyen Stop (Trailing Stop) ve Başa Baş (Breakeven).
+- **Yapay Zeka ve NLP:** Random Forest ile sinyal doğrulaması, NLTK VADER ile RSS Haber duyarlılık vetosu.
+- **Kesirli Kelly Kriteri (Fractional Kelly):** Kazanma olasılığına göre matematiksel kasa boyutlandırma.
+- **Siyah Kuğu Koruması (VIX & Z-Score):** Piyasa çöktüğünde otomatik kapanan "Devre Kesiciler".
+- **Broker Abstraction:** SOLID prensipleriyle sanal (Paper) ve gerçek borsalar (Live) arası anında geçiş.
+- **Docker Ready:** %100 izole, Volume Mapping ile kalıcı veri.
 
-## Installation
+## Kurulum ve Çalıştırma
 
-1. Clone the repository.
-2. Setup your environment:
-   `cp .env.example .env` (Add your Telegram Token and Chat ID).
-3. Start the bot via Docker Compose:
-   `./manage_bot.sh start`
+### 1. Ortam Değişkenleri
+Proje dizininde `.env` dosyası oluşturun:
+```bash
+TELEGRAM_TOKEN=your_bot_token_here
+ADMIN_CHAT_ID=your_chat_id_here
+```
 
-## Operations
-Manage the bot using the included script:
-- `./manage_bot.sh start`
-- `./manage_bot.sh stop`
-- `./manage_bot.sh logs`
-- `./manage_bot.sh status`
+### 2. Docker Compose İle Çalıştırma
+```bash
+chmod +x manage_bot.sh
+./manage_bot.sh start
+```
 
-## Disclaimer
-This is for educational and paper-trading purposes only. Financial markets are extremely risky.
+### 3. Logları İzleme
+```bash
+./manage_bot.sh logs
+```
+
+## Güvenlik Duvarı
+Bu motor SPL Düzey 3 güvenlik kurallarına göre çalışır:
+- DXY/TNX artışlarında gelişmekte olan piyasalara risk alınmaz.
+- Pozisyon korelasyonları .75 üzerindeyse riske girilmez.
+- `paper_db.sqlite3` Host makineye bağlanmıştır, konteyner silinse bile data kaybolmaz.\n

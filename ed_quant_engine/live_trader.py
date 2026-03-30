@@ -101,12 +101,12 @@ class LiveTrader:
                 )
 
                 if receipt:
-                    msg = f"🟢 <b>YENİ İŞLEM AÇILDI</b>\n" \
-                          f"Varlık: {ticker}\n" \
-                          f"Yön: {signal['direction']}\n" \
-                          f"Giriş: {exec_price:.4f}\n" \
-                          f"SL: {signal['sl']:.4f}\n" \
-                          f"TP: {signal['tp']:.4f}\n" \
+                    msg = f"🟢 <b>YENİ İŞLEM AÇILDI</b>" \
+                          f"Varlık: {ticker}" \
+                          f"Yön: {signal['direction']}" \
+                          f"Giriş: {exec_price:.4f}" \
+                          f"SL: {signal['sl']:.4f}" \
+                          f"TP: {signal['tp']:.4f}" \
                           f"Büyüklük: {size:.4f}"
                     notifier.send_message(msg)
 
@@ -160,10 +160,10 @@ class LiveTrader:
                 if self.broker.close_position(trade_id, exit_price, reason):
                     pnl = (exit_price - entry) * trade['position_size'] if direction == 'Long' else (entry - exit_price) * trade['position_size']
                     emoji = "✅" if pnl > 0 else "❌"
-                    msg = f"{emoji} <b>İŞLEM KAPANDI</b>\n" \
-                          f"Varlık: {ticker} ({direction})\n" \
-                          f"Çıkış: {exit_price:.4f}\n" \
-                          f"Sebep: {reason}\n" \
+                    msg = f"{emoji} <b>İŞLEM KAPANDI</b>" \
+                          f"Varlık: {ticker} ({direction})" \
+                          f"Çıkış: {exit_price:.4f}" \
+                          f"Sebep: {reason}" \
                           f"PnL: ${pnl:.2f}"
                     notifier.send_message(msg)
             else:

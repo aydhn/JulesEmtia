@@ -1,67 +1,67 @@
 import yfinance as yf
 import pandas as pd
-import numpy as np
-import time
-from typing import Dict, Optional
-from config import ALL_TICKERS, HTF, LTF
-from logger import log
+from logger import logger
+import asyncio
 
-class DataLoader:
-    def __init__(self, tickers=ALL_TICKERS):
-        self.tickers = tickers
+async def fetch_data_with_retry(ticker: str, period: str, interval: str, retries=3) -> pd.DataFrame:
+    for attempt in range(retries):
+        try:
+            # Run blocking I/O in thread
+            df = await asyncio.to_thread(yf.download, ticker, period=period, interval=interval, progress=False)
+            if df.empty:
+                raise ValueError(f"Empty dataframe returned for {ticker}")
+            return df
+        except Exception as e:
+            logger.warning(f"Data fetch error for {ticker} (Attempt {attempt+1}/{retries}): {e}")
+            if attempt < retries - 1:
+                await asyncio.sleep(2 ** attempt)  # Exponential backoff
+            else:
+                logger.error(f"Failed to fetch {interval} data for {ticker} after {retries} attempts.")
+                return pd.DataFrame()
 
-    def _fetch_data_with_retry(self, ticker: str, interval: str, period: str, max_retries: int = 3) -> pd.DataFrame:
-        """Fetches data from yfinance with exponential backoff for rate limits."""
-        for attempt in range(max_retries):
-            try:
-                log.info(f"Fetching {ticker} [{interval}] (Attempt {attempt+1}/{max_retries})")
-                df = yf.download(ticker, period=period, interval=interval, progress=False)
+async def fetch_mtf_data(ticker: str) -> pd.DataFrame:
+    try:
+        # Fetch data concurrently
+        df_1d, df_1h = await asyncio.gather(
+            fetch_data_with_retry(ticker, period="2y", interval="1d"),
+            fetch_data_with_retry(ticker, period="1mo", interval="1h")
+        )
 
-                # Handle multi-level columns if returned by newer yfinance versions
-                if isinstance(df.columns, pd.MultiIndex):
-                    # For a single ticker, drop the ticker level
-                    df.columns = df.columns.droplevel(1)
+        if df_1d.empty or df_1h.empty:
+            return pd.DataFrame()
 
-                if df.empty:
-                    log.warning(f"Empty dataframe returned for {ticker}")
-                    # If empty, might be weekend/holiday, not necessarily an error, but we retry just in case
-                    time.sleep(2 ** attempt)
-                    continue
+        # Remove timezone to prevent merge errors
+        df_1d.index = df_1d.index.tz_localize(None)
+        df_1h.index = df_1h.index.tz_localize(None)
 
-                # Clean up NaN values via forward fill (common in forex/commodities)
-                df.ffill(inplace=True)
-                df.dropna(inplace=True) # Drop initial NaNs
+        # Flatten multiindex columns if present
+        if isinstance(df_1d.columns, pd.MultiIndex):
+            df_1d.columns = [c[0] for c in df_1d.columns]
+        if isinstance(df_1h.columns, pd.MultiIndex):
+            df_1h.columns = [c[0] for c in df_1h.columns]
 
-                # Strip timezone for MTF alignment safety
-                if df.index.tz is not None:
-                    df.index = df.index.tz_localize(None)
+        import pandas_ta as ta
+        # PRE-CALCULATE DAILY INDICATORS BEFORE MERGING
+        # This ensures a 50-period EMA means 50 DAYS, not 50 hours!
+        df_1d['EMA_50'] = ta.ema(df_1d['Close'], length=50)
+        macd_1d = ta.macd(df_1d['Close'], fast=12, slow=26, signal=9)
+        if macd_1d is not None and not macd_1d.empty:
+            df_1d['MACD'] = macd_1d.iloc[:, 0]
 
-                return df
+        # Shift the daily data by 1 to completely eliminate Lookahead Bias.
+        # This ensures that for any hour today, we only look at YESTERDAY'S fully closed daily candle.
+        df_1d_shifted = df_1d.shift(1)
 
-            except Exception as e:
-                log.error(f"Error fetching {ticker}: {e}")
-                if attempt < max_retries - 1:
-                    sleep_time = (2 ** attempt) * 60 # 1m, 2m, 4m
-                    log.info(f"Sleeping for {sleep_time}s before retry...")
-                    time.sleep(sleep_time)
-                else:
-                    log.error(f"Max retries reached for {ticker}")
-                    return pd.DataFrame()
+        # Rename daily columns so they don't clash with hourly columns
+        df_1d_shifted.columns = [f"{c}_1d" for c in df_1d_shifted.columns]
+
+        # Merge hourly data with the *previous* day's closed daily data
+        df_merged = pd.merge_asof(df_1h, df_1d_shifted, left_index=True, right_index=True, direction='backward')
+
+        df_merged.ffill(inplace=True)
+        df_merged.dropna(inplace=True)
+
+        return df_merged
+    except Exception as e:
+        logger.error(f"MTF data alignment error for {ticker}: {e}")
         return pd.DataFrame()
-
-    def get_mtf_data(self, ticker: str, period_htf: str = "2y", period_ltf: str = "60d") -> Dict[str, pd.DataFrame]:
-        """Fetches both Higher Timeframe (1d) and Lower Timeframe (1h) data."""
-        df_htf = self._fetch_data_with_retry(ticker, HTF, period_htf)
-        df_ltf = self._fetch_data_with_retry(ticker, LTF, period_ltf)
-
-        return {"HTF": df_htf, "LTF": df_ltf}
-
-    def fetch_all_current_data(self) -> Dict[str, Dict[str, pd.DataFrame]]:
-        """Scans universe and returns dictionary of HTF/LTF dataframes."""
-        data_dict = {}
-        for ticker in self.tickers:
-            data = self.get_mtf_data(ticker)
-            if not data["HTF"].empty and not data["LTF"].empty:
-                data_dict[ticker] = data
-            time.sleep(1) # Polite delay
-        return data_dict
