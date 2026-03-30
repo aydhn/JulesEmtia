@@ -2,248 +2,346 @@ import asyncio
 import schedule
 import time
 import os
+import signal
 import gc
-import pandas as pd
-from datetime import datetime
-from dotenv import load_dotenv
+from datetime import datetime, timezone
+import warnings
+warnings.filterwarnings('ignore')
 
-from src.logger import get_logger
-from src.notifier import send_telegram_message_async, send_telegram_document_async, notify_critical_error, start_telegram_listener, global_state
-from src.broker import PaperBroker
-from src.data_loader import fetch_universe_async, align_mtf_data, UNIVERSE
-from src.features import add_features, calculate_z_score
-from src.macro_filter import fetch_macro_regime, apply_macro_veto
-from src.sentiment_filter import check_sentiment_veto
-from src.portfolio_manager import check_global_exposure, check_correlation_veto, calculate_correlation_matrix, get_dynamic_position_size
-from src.strategy import generate_signals
-from src.execution_model import apply_execution_costs
-from src.ml_validator import check_ml_veto, train_model
-from src.reporter import generate_tear_sheet
+from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update
 
-load_dotenv()
-logger = get_logger("main")
+from core.infrastructure import logger, PaperDB, PaperBroker, TelegramNotifier
+from core.config import ADMIN_CHAT_ID, TELEGRAM_BOT_TOKEN
+from core.data_engine import DataEngine, SentimentEngine
+from core.quant_models import add_features, RiskManager, MLValidator
+from core.reporter import Reporter
+from core.config import TICKERS, GLOBAL_EXPOSURE_LIMIT
 
-broker = PaperBroker(initial_balance=10000.0)
+# ----------------- GLOBALS & STATE (Phases 8, 17, 23) -----------------
+system_paused = False
+vix_circuit_breaker_active = False
+paper_db = PaperDB()
+broker = PaperBroker(paper_db) # SOLID Phase 24
+risk_manager = RiskManager(paper_db)
+data_engine = DataEngine(TICKERS)
+sentiment_engine = SentimentEngine()
+ml_validator = MLValidator()
+telegram = TelegramNotifier(TELEGRAM_BOT_TOKEN, str(ADMIN_CHAT_ID))
+reporter = Reporter(paper_db)
 
-async def check_open_positions_task(vix_spike_active: bool = False):
-    """Checks TP/SL and Trailing Stop logic. Aggressive defense if VIX Spike is active."""
-    try:
-        open_positions = broker.get_open_positions()
-        if not open_positions: return
+# ----------------- TELEGRAM COMMANDS (Phase 17) -----------------
+async def auth_check(update: Update) -> bool:
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        logger.critical(f"Unauthorized access attempt from {update.effective_chat.id}")
+        return False
+    return True
 
-        import yfinance as yf
-        tickers = list(set([p['ticker'] for p in open_positions]))
-        df_prices = yf.download(tickers, period="1d", interval="1m", progress=False)['Close']
+async def cmd_durum(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await auth_check(update): return
+    balance = broker.get_account_balance()
+    open_trades = broker.get_open_positions()
+    msg = f"📊 *Durum Raporu*\nGüncel Bakiye: ${balance:.2f}\nAçık Pozisyonlar: {len(open_trades)}/{GLOBAL_EXPOSURE_LIMIT}\nVIX Devre Kesici: {'Aktif' if vix_circuit_breaker_active else 'Pasif'}\nTarama Durumu: {'Duraklatıldı' if system_paused else 'Aktif'}"
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
-        if isinstance(df_prices, pd.Series):
-            current_prices = {tickers[0]: df_prices.iloc[-1]}
-        else:
-            current_prices = {t: df_prices[t].iloc[-1] for t in tickers}
+async def cmd_durdur(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await auth_check(update): return
+    global system_paused
+    system_paused = True
+    logger.info("System paused via Telegram.")
+    await update.message.reply_text("⏸ Sistem duraklatıldı. Açık pozisyon takibi devam edecek, yeni sinyal aranmayacak.")
 
-        for p in open_positions:
-            ticker = p['ticker']
-            if ticker not in current_prices: continue
+async def cmd_devam(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await auth_check(update): return
+    global system_paused
+    system_paused = False
+    logger.info("System resumed via Telegram.")
+    await update.message.reply_text("▶ Sistem devam ediyor. Taramalar aktif.")
 
-            curr_price = current_prices[ticker]
-            entry_price = p['entry_price']
-            sl_price = p['sl_price']
-            tp_price = p['tp_price']
-            direction = p['direction']
-            lot_size = p['position_size']
+async def cmd_kapat_hepsi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await auth_check(update): return
+    open_trades = broker.get_open_positions()
+    logger.critical("PANIC BUTTON TRIGGERED: Closing all open positions.")
+    for _, trade in open_trades.iterrows():
+        # Fallback closure (using entry price for demo panic close, real scenario fetches live price)
+        broker.close_position(trade['trade_id'], trade['entry_price'], 0.0)
+    await update.message.reply_text("🚨 Tüm açık pozisyonlar acil durum protokolüyle kapatıldı!")
 
-            # Realistic costs
-            exit_price = apply_execution_costs(ticker, "Close", curr_price, 0.0, 0.0)
+async def cmd_tara(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await auth_check(update): return
+    await update.message.reply_text("🔍 Manuel tarama (Force Scan) başlatılıyor...")
+    asyncio.create_task(run_live_cycle())
 
-            # 1. Stop Loss Hit
-            if (direction == "Long" and exit_price <= sl_price) or (direction == "Short" and exit_price >= sl_price):
-                pnl = (exit_price - entry_price) * lot_size if direction == "Long" else (entry_price - exit_price) * lot_size
-                broker.close_position(p['trade_id'], exit_price, pnl, "Stop Loss Hit")
-                await send_telegram_message_async(f"🛑 <b>Stop Loss Hit</b>\n{ticker} {direction}\nEntry: {entry_price:.4f}\nExit: {exit_price:.4f}\nPNL: ${pnl:.2f}")
+
+# ----------------- CORRELATION MATRIX (Phase 11) -----------------
+async def build_correlation_matrix() -> pd.DataFrame:
+    close_prices = {}
+    for cat, tickers in TICKERS.items():
+        for ticker in tickers:
+            try:
+                # 30 day lookback for correlation
+                df = await asyncio.to_thread(lambda t=ticker: data_engine._fetch_yf_data(t, "1d", "3mo"))
+                if df is not None and not df.empty:
+                    close_prices[ticker] = df['Close']
+            except:
                 continue
 
-            # 2. Take Profit Hit
-            if (direction == "Long" and exit_price >= tp_price) or (direction == "Short" and exit_price <= tp_price):
-                pnl = (exit_price - entry_price) * lot_size if direction == "Long" else (entry_price - exit_price) * lot_size
-                broker.close_position(p['trade_id'], exit_price, pnl, "Take Profit Hit")
-                await send_telegram_message_async(f"✅ <b>Take Profit Hit</b>\n{ticker} {direction}\nEntry: {entry_price:.4f}\nExit: {exit_price:.4f}\nPNL: ${pnl:.2f}")
-                continue
+    if not close_prices:
+        return pd.DataFrame()
 
-            # 3. Breakeven / Trailing Stop Logic & VIX Defense
-            dist_to_tp = abs(tp_price - entry_price)
-            curr_dist = abs(curr_price - entry_price)
+    price_df = pd.DataFrame(close_prices)
+    # Calculate daily returns
+    returns = price_df.pct_change().dropna()
+    # Pearson correlation
+    corr_matrix = returns.corr()
+    return corr_matrix
 
-            # If Black Swan (VIX Spike) is active, move SL aggressively to breakeven if in profit, or panic close.
-            if vix_spike_active:
-                if (direction == "Long" and curr_price > entry_price) or (direction == "Short" and curr_price < entry_price):
-                    if (direction == "Long" and sl_price < entry_price) or (direction == "Short" and sl_price > entry_price):
-                        broker.modify_stop_loss(p['trade_id'], entry_price)
-                        await send_telegram_message_async(f"🚨 <b>VIX Defense</b>\n{ticker} SL aggressively moved to breakeven ({entry_price:.4f})")
-
-            # Normal Trailing logic
-            elif curr_dist > (dist_to_tp * 0.5):
-                if (direction == "Long" and sl_price < entry_price) or (direction == "Short" and sl_price > entry_price):
-                    broker.modify_stop_loss(p['trade_id'], entry_price)
-                    await send_telegram_message_async(f"🔒 <b>Risk Free</b>\n{ticker} SL moved to entry ({entry_price:.4f})")
-
-    except Exception as e:
-        logger.error(f"Error checking open positions: {e}")
-
+# ----------------- CORE PIPELINE (Phase 23) -----------------
 async def run_live_cycle():
-    logger.info("Starting Live Scan Cycle...")
-    try:
-        # 1. Macro Regime Check (VIX Spike)
-        macro_state = fetch_macro_regime()
-        vix_spike = macro_state["VIX_Spike"]
+    """Main Orchestration Pipeline."""
+    global system_paused, vix_circuit_breaker_active
+    logger.info(f"--- Starting Live Cycle: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
 
-        if vix_spike:
-            logger.critical("VIX Spike detected! Defensive mode engaged. New operations halted.")
-            await send_telegram_message_async("🚨 <b>VIX CIRCUIT BREAKER ENGAGED!</b>\nNew trades halted. Open positions are under aggressive defense.")
+    # 1. State Recovery & Open Position Management (Phases 8, 12)
+    open_trades = broker.get_open_positions()
+    logger.info(f"Recovered {len(open_trades)} open positions.")
 
-        # 2. Check Open Positions & Manage Risk ALWAYS runs, even if VIX spiked or paused
-        await check_open_positions_task(vix_spike_active=vix_spike)
+    for _, trade in open_trades.iterrows():
+        ticker = trade['ticker']
+        # Light fetch for current price
+        try:
+            current_data = await asyncio.to_thread(lambda: data_engine._fetch_yf_data(ticker, "1h", "1d"))
+            if current_data is not None and not current_data.empty:
+                current_price = current_data['Close'].iloc[-1]
+                atr = current_data['Close'].iloc[-1] * 0.01 # Fallback approximation if ta missing
 
-        # If system is paused by admin OR VIX is spiking, skip new trade generation
-        if global_state.get("is_paused", False) or vix_spike:
-            logger.info("System is Paused or VIX is Spiking. Skipping new scan.")
-            return
+                # Check TP / SL hits
+                if trade['direction'] == "Long":
+                    if current_price <= trade['sl_price'] or current_price >= trade['tp_price']:
+                        pnl = (current_price - trade['entry_price']) * trade['position_size']
+                        broker.close_position(trade['trade_id'], current_price, pnl)
+                        telegram.send_message(f"✅ İşlem Kapandı: {ticker} Long @ {current_price:.4f} | PnL: ${pnl:.2f}")
+                        continue
+                else: # Short
+                    if current_price >= trade['sl_price'] or current_price <= trade['tp_price']:
+                        pnl = (trade['entry_price'] - current_price) * trade['position_size']
+                        broker.close_position(trade['trade_id'], current_price, pnl)
+                        telegram.send_message(f"✅ İşlem Kapandı: {ticker} Short @ {current_price:.4f} | PnL: ${pnl:.2f}")
+                        continue
 
-        # 3. Check Capacity
-        if check_global_exposure(0.06): return
+                # Modify Trailing Stop
+                new_sl = risk_manager.calculate_trailing_stop(trade['direction'], current_price, trade['entry_price'], trade['sl_price'], atr)
+                if new_sl != trade['sl_price']:
+                    broker.modify_trailing_stop(trade['trade_id'], new_sl)
 
-        # 4. Fetch Data (MTF)
-        ltf_data = await fetch_universe_async("1h", "1mo")
-        htf_data = await fetch_universe_async("1d", "6mo")
+        except Exception as e:
+            logger.error(f"Error managing position {trade['trade_id']} for {ticker}: {e}")
 
-        if not ltf_data or not htf_data:
-            logger.error("Data fetch returned empty. Aborting cycle.")
-            return
+    # Build correlation matrix dynamically (Phase 11)
+    logger.info("Building Dynamic Correlation Matrix...")
+    corr_matrix = await build_correlation_matrix()
 
-        corr_matrix = calculate_correlation_matrix(htf_data)
-
-        # 5. Signal Generation Loop
-        for ticker in UNIVERSE.keys():
-            if ticker not in ltf_data or ticker not in htf_data: continue
-
-            df_ltf = add_features(ltf_data[ticker])
-            df_htf = add_features(htf_data[ticker])
-
-            if df_ltf.empty or df_htf.empty: continue
-
-            # Micro Flash Crash / Z-Score Anomaly Detection
-            df_ltf['Z_Score'] = calculate_z_score(df_ltf['Close'], window=50)
-            z_score_current = df_ltf['Z_Score'].iloc[-1]
-
-            if abs(z_score_current) > 4.0:
-                logger.warning(f"Z-Score Anomaly VETO: {ticker} has Z-Score {z_score_current:.2f}. Halting operations for this asset.")
-                continue # Skip this asset for this cycle
-
-            # Align Timeframes
-            df_aligned = align_mtf_data(df_ltf, df_htf)
-
-            # Strategy Eval
-            signal, sl_dist, tp_dist = generate_signals(df_aligned)
-            if not signal: continue
-
-            current_row = df_aligned.iloc[-1].to_dict()
-            market_price = current_row['Close']
-
-            # --- VETO CHECKS ---
-            if apply_macro_veto(signal, macro_state["Regime"], ticker): continue
-            if check_correlation_veto(ticker, signal, corr_matrix): continue
-            if check_ml_veto(current_row): continue
-            if check_sentiment_veto(ticker, signal): continue
-
-            # --- EXECUTION ---
-            current_atr = current_row['ATR_14']
-            avg_atr = df_aligned['ATR_14'].mean()
-
-            entry_price = apply_execution_costs(ticker, signal, market_price, current_atr, avg_atr)
-
-            sl_price = entry_price - sl_dist if signal == "Long" else entry_price + sl_dist
-            tp_price = entry_price + tp_dist if signal == "Long" else entry_price - tp_dist
-
-            lot_size = get_dynamic_position_size(ticker, broker.get_account_balance(), entry_price, sl_price)
-            if lot_size <= 0: continue
-
-            # Open Trade
-            receipt = broker.place_market_order(ticker, signal, entry_price, sl_price, tp_price, lot_size, "MTF-Confirmed")
-
-            msg = f"🚀 <b>NEW {signal} SIGNAL EXECUTED</b>\n\n<b>Asset:</b> {ticker}\n<b>Entry:</b> {entry_price:.4f}\n<b>SL:</b> {sl_price:.4f}\n<b>TP:</b> {tp_price:.4f}\n<b>Size:</b> {lot_size:.4f} Lots"
-            await send_telegram_message_async(msg)
-
-    except Exception as e:
-        notify_critical_error(e, "run_live_cycle")
-    finally:
+    # If paused or max exposure reached, skip new signal generation
+    if system_paused:
+        logger.info("System is paused. Skipping signal generation.")
         gc.collect()
-        logger.info("Cycle completed. Memory cleaned.")
+        return
 
-def heartbeat():
-    bal = broker.get_account_balance()
-    open_pos = len(broker.get_open_positions())
-    msg = f"🟢 <b>ED Quant Engine Heartbeat</b>\n\n<b>Status:</b> Active & Scanning\n<b>Balance:</b> ${bal:,.2f}\n<b>Open Positions:</b> {open_pos}\n<b>VIX/Regime OK.</b>"
-    asyncio.create_task(send_telegram_message_async(msg))
+    if len(open_trades) >= GLOBAL_EXPOSURE_LIMIT:
+        logger.info("Global exposure limit reached. Skipping signal generation.")
+        gc.collect()
+        return
 
-def weekly_report():
-    report_path = generate_tear_sheet(10000.0)
-    if report_path:
-        asyncio.create_task(send_telegram_document_async(report_path, "ED Capital Haftalık Performans Raporu"))
+    # 2. VIX Circuit Breaker (Phase 19)
+    macro_dfs = await data_engine.fetch_macro_data()
+    vix_df = macro_dfs.get('^VIX')
+    if vix_df is not None and not vix_df.empty:
+        current_vix = vix_df['Close'].iloc[-1]
+        logger.info(f"Current VIX: {current_vix:.2f}")
+        if current_vix > 35.0: # Black Swan Panic Level
+            vix_circuit_breaker_active = True
+            logger.critical(f"VIX Circuit Breaker Activated ({current_vix:.2f}). Halting new trades.")
+            telegram.send_message("🚨 KRİTİK UYARI: VIX Devre Kesici Tetiklendi! Sistem Savunma Moduna Geçti. Yeni İşlemler Durduruldu.")
+            gc.collect()
+            return
+    vix_circuit_breaker_active = False
 
-async def ml_retraining_task():
-    """Background task to fetch historical data and retrain the ML model."""
-    logger.info("Initiating Weekend ML Model Retraining...")
-    await send_telegram_message_async("🧠 <b>ML Model Retraining:</b> Fetching historical data to update Random Forest logic...")
+    # 3. Market Scan & Signal Generation (Phases 3, 4, 11, 15, 16, 18, 20)
+    for category, ticker_list in TICKERS.items():
+        for ticker in ticker_list:
+            try:
+                # MTF Fetching & Alignment (Phase 16)
+                df_htf, df_ltf = await data_engine.fetch_mtf_data(ticker)
+                if df_htf is None or df_ltf is None: continue
+
+                df_htf_features = add_features(df_htf)
+                df_ltf_features = add_features(df_ltf)
+
+                if df_htf_features.empty or df_ltf_features.empty: continue
+
+                # Align daily to hourly to prevent lookahead
+                aligned_df = data_engine.align_mtf_data(df_htf_features, df_ltf_features)
+                if aligned_df.empty: continue
+
+                # Signal Logic (Phase 4 & 16)
+                last_row = aligned_df.iloc[-1]
+                prev_row = aligned_df.iloc[-2] # Confirm on closed hourly candle
+
+                # MICRO FLASH CRASH VETO (Phase 19 Z-Score)
+                current_z_score = last_row['Z_Score']
+                if abs(current_z_score) >= 4.0:
+                    logger.critical(f"FLASH CRASH HALT: {ticker} Z-Score is {current_z_score:.2f} (Anomaly). Rejecting all signals.")
+                    continue
+
+                # HTF Daily Trend Filter
+                htf_trend_up = last_row['HTF_Close'] > last_row['HTF_EMA_50']
+                htf_trend_down = last_row['HTF_Close'] < last_row['HTF_EMA_50']
+
+                # LTF Hourly Entry Trigger
+                ltf_rsi_bullish = prev_row['RSI_14'] < 30 and last_row['RSI_14'] >= 30
+                ltf_rsi_bearish = prev_row['RSI_14'] > 70 and last_row['RSI_14'] <= 70
+
+                direction = None
+                if htf_trend_up and ltf_rsi_bullish:
+                    direction = "Long"
+                elif htf_trend_down and ltf_rsi_bearish:
+                    direction = "Short"
+
+                if not direction:
+                    continue # No Signal
+
+                logger.info(f"Technical Signal Found: {ticker} {direction}")
+
+                # VETO 1: Machine Learning (Phase 18)
+                if not ml_validator.validate_signal(aligned_df, direction):
+                    continue
+
+                # VETO 2: News Sentiment (Phase 20)
+                sentiment_score = await sentiment_engine.fetch_sentiment(category)
+                if (direction == "Long" and sentiment_score < -0.5) or (direction == "Short" and sentiment_score > 0.5):
+                    logger.warning(f"Sentiment Veto: {ticker} {direction} (Score: {sentiment_score:.2f})")
+                    continue
+
+                # VETO 3: Correlation Matrix (Phase 11)
+                if not corr_matrix.empty:
+                    if not risk_manager.check_portfolio_limits(ticker, direction, corr_matrix):
+                        continue
+
+                # Execution (Phase 15, 21, 24)
+                current_price = last_row['Close']
+                atr = last_row['ATRr_14']
+
+                # Dynamic ATR SL/TP
+                sl_price = current_price - (1.5 * atr) if direction == "Long" else current_price + (1.5 * atr)
+                tp_price = current_price + (3.0 * atr) if direction == "Long" else current_price - (3.0 * atr)
+
+                balance = broker.get_account_balance()
+                lot_size = risk_manager.calculate_position_size(current_price, atr, balance)
+
+                if lot_size <= 0:
+                    logger.warning(f"Kelly constraint failed lot size for {ticker}")
+                    continue
+
+                spread, slippage = risk_manager.dynamic_spread_slippage(ticker, current_price, atr)
+
+                # PLACE ORDER
+                receipt = broker.place_market_order(ticker, direction, lot_size, sl_price, tp_price, current_price, spread, slippage)
+
+                # Notify
+                msg = f"🚀 *Yeni Sinyal: {ticker}*\n"
+                msg += f"Yön: {direction}\n"
+                msg += f"Giriş: {receipt['entry_price']:.4f}\n"
+                msg += f"SL: {sl_price:.4f} | TP: {tp_price:.4f}\n"
+                msg += f"Lot: {lot_size:.4f} (Kelly)\n"
+                telegram.send_message(msg)
+
+            except Exception as e:
+                logger.error(f"Error processing {ticker}: {e}")
+
+    # Memory Management (Phase 23)
+    gc.collect()
+    logger.info("--- Cycle Complete ---")
+
+
+# ----------------- SCHEDULED BACKGROUND TASKS (Phases 8, 13, 18) -----------------
+def daily_heartbeat():
+    open_trades = broker.get_open_positions()
+    msg = f"🟢 *Sistem Aktif (Heartbeat)*\n"
+    msg += f"Kasa: ${broker.get_account_balance():.2f}\n"
+    msg += f"Açık Pozisyon: {len(open_trades)}\n"
+    telegram.send_message(msg)
+
+def weekly_tear_sheet():
+    logger.info("Generating Weekly Tear Sheet...")
     try:
-        # Fetch long-term daily data for Gold as a primary proxy for training features
-        # In a real setup, we would concatenate features across the whole universe.
-        import yfinance as yf
-        df = yf.download("GC=F", period="5y", interval="1d", progress=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
-
-        df = add_features(df)
-        success = train_model(df)
-
-        if success:
-            await send_telegram_message_async("✅ <b>ML Model Updated Successfully.</b> Random Forest is ready for the new week.")
-        else:
-            await send_telegram_message_async("⚠️ <b>ML Model Update Failed.</b> Will continue using the existing/old model.")
+        report_path = reporter.generate_tear_sheet()
+        if report_path.endswith(".html"):
+            telegram.send_message("📊 Haftalık Tear Sheet (HTML) oluşturuldu.")
+            # In a real scenario with Pyrogram/TelegramBot, send Document.
+            # telegram.send_document(report_path)
     except Exception as e:
-        logger.error(f"ML Retraining failed: {e}")
+        logger.error(f"Error generating tear sheet: {e}")
 
-def trigger_ml_retraining():
-    asyncio.create_task(ml_retraining_task())
+def weekly_ml_retrain():
+    logger.info("Retraining ML Model (Phase 18)...")
+    try:
+        # Fetch long term history for a major ticker (e.g. GC=F) as a proxy,
+        # or aggregate across universe. We use Gold for now.
+        import yfinance as yf
+        from core.quant_models import add_features
+        hist_df = yf.Ticker("GC=F").history(period="1y", interval="1d")
+        hist_df = add_features(hist_df)
+        ml_validator.train(hist_df)
+        telegram.send_message("🧠 ML Modeli başarıyla yeniden eğitildi.")
+    except Exception as e:
+        logger.error(f"Error retraining ML model: {e}")
 
-async def schedule_loop():
-    schedule.every().hour.at(":00").do(lambda: asyncio.create_task(run_live_cycle()))
-    schedule.every().day.at("08:00").do(heartbeat)
-    schedule.every().friday.at("22:00").do(weekly_report)
+# Register schedule jobs
+schedule.every().day.at("08:00").do(daily_heartbeat)
+schedule.every().friday.at("23:50").do(weekly_tear_sheet)
+schedule.every().saturday.at("10:00").do(weekly_ml_retrain)
 
-    # Weekly ML Retraining (e.g., Saturday night when markets are closed)
-    schedule.every().saturday.at("23:00").do(trigger_ml_retraining)
-
-    logger.info("Scheduler started. Waiting for triggers...")
-
-    await start_telegram_listener()
-    await send_telegram_message_async("🚀 <b>ED Capital Quant Engine Started</b>\nAll modules loaded. Wait for MTF sync cycle.")
-
-    # Run initial ML training if the model file doesn't exist yet
-    if not os.path.exists("models/rf_validator.joblib"):
-        trigger_ml_retraining()
-
+# ----------------- BACKGROUND SCHEDULER (Phase 9) -----------------
+async def scheduled_loop():
+    """Run `run_live_cycle` strictly on the hour."""
+    telegram.send_message("🟢 *ED Capital Quant Engine Canlı Modda Başlatıldı.*")
     while True:
         schedule.run_pending()
-
-        if global_state.get("force_scan", False):
-            logger.info("Force scan triggered via Telegram.")
-            global_state["force_scan"] = False
-            asyncio.create_task(run_live_cycle())
-
+        now = datetime.now()
+        # Trigger on top of the hour (e.g., 14:00:00)
+        if now.minute == 0 and now.second < 10:
+            await run_live_cycle()
+            await asyncio.sleep(60) # Prevent multiple triggers in the same minute
         await asyncio.sleep(1)
 
+# ----------------- MAIN BOOTSTRAP -----------------
 if __name__ == "__main__":
+    logger.info("Starting ED Capital Quant Engine...")
+
+    # Initialize DB and Broker
+    logger.info(f"Initial Balance: ${broker.get_account_balance():.2f}")
+
+    # Setup Telegram Application (Polling mode - non-blocking via asyncio in v20+)
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("durum", cmd_durum))
+    application.add_handler(CommandHandler("durdur", cmd_durdur))
+    application.add_handler(CommandHandler("devam", cmd_devam))
+    application.add_handler(CommandHandler("kapat_hepsi", cmd_kapat_hepsi))
+    application.add_handler(CommandHandler("tara", cmd_tara))
+
+    loop = asyncio.get_event_loop()
+
+    # Start Telegram polling
+    # Correctly initialize and start python-telegram-bot v20+ in an existing asyncio loop
+    loop.run_until_complete(application.initialize())
+    loop.run_until_complete(application.start())
+    loop.run_until_complete(application.updater.start_polling())
+
+    # Start the Trading loop
     try:
-        asyncio.run(schedule_loop())
+        loop.run_until_complete(scheduled_loop())
     except KeyboardInterrupt:
-        logger.info("Bot stopped manually.")
-    except Exception as e:
-        logger.critical(f"Fatal error in main loop: {e}")
+        logger.info("Shutting down gracefully...")
+    finally:
+        loop.close()

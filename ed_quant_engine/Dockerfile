@@ -1,36 +1,36 @@
-# Use slim python image to minimize size
+# Phase 25: Corporate Container Architecture
 FROM python:3.10-slim
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV TZ=Europe/Istanbul
-
-# Install system dependencies required for compilation and reporting
+# Install system dependencies (build-essential for compiling numpy/pandas C extensions)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    gcc \
+    curl \
     wkhtmltopdf \
     && rm -rf /var/lib/apt/lists/*
 
-# Set work directory
+# Set working directory
 WORKDIR /app
 
-# Install Python dependencies
-COPY requirements.txt /app/
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# Create a non-root user (Best Practice)
+RUN groupadd -r quant && useradd -r -g quant quant
+RUN chown -R quant:quant /app
 
-# Copy project files
-COPY . /app/
+# Copy requirements and install
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Create necessary directories and set permissions for a non-root user
-RUN mkdir -p /app/data /app/logs /app/models /app/reports && \
-    useradd -m quantuser && \
-    chown -R quantuser:quantuser /app
+# NLTK Vader Lexicon pre-download to save container startup time
+RUN python -c "import nltk; nltk.download('vader_lexicon')"
 
-# Switch to non-root user for security
-USER quantuser
+# Copy application files
+COPY core/ ./core/
+COPY main.py .
 
-# Command to run the bot
+# Permissions
+RUN chown -R quant:quant /app
+
+# Switch to non-root user
+USER quant
+
+# Run the background loop
 CMD ["python", "main.py"]
