@@ -1,6 +1,6 @@
 import os
-import numpy as np
 import joblib
+import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from core.logger import get_logger
 
@@ -8,32 +8,43 @@ logger = get_logger()
 
 class MLValidator:
     def __init__(self):
-        self.model_path = "data/ml_validator.pkl"
-        self.model = self._load_or_train_ml()
+        self.model_path = "ml_model.pkl"
+        self.model = self._load_model()
+        self.threshold = 0.60 # %60 confidence required
 
-    def _load_or_train_ml(self):
-        os.makedirs("data", exist_ok=True)
+    def _load_model(self):
         if os.path.exists(self.model_path):
-            try:
-                return joblib.load(self.model_path)
-            except Exception as e:
-                logger.error(f"ML Model Load Error: {e}")
+            return joblib.load(self.model_path)
+        return RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
 
-        logger.info("Training initial ML Validator Model...")
-        clf = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
-
-        # Fake data for bootstrapping, real data will be retrained periodically
-        X = np.random.rand(500, 3) # RSI, Z_Score, ATR
-        y = np.random.randint(0, 2, 500)
-        clf.fit(X, y)
-
-        joblib.dump(clf, self.model_path)
-        return clf
-
-    def ml_veto(self, features: list, threshold: float = 0.60) -> bool:
+    def train_model(self, df: pd.DataFrame):
+        """Trains the Random Forest on historical signals."""
         try:
-            prob = self.model.predict_proba(np.array(features).reshape(1, -1))[0][1]
-            return prob < threshold
+            # Future (Next 10 bars return > 1%)
+            df['Future_Return'] = df['Close'].shift(-10) / df['Close'] - 1
+            df['Target'] = (df['Future_Return'] > 0.01).astype(int)
+
+            features = ['RSI', 'Z_Score', 'ATR', 'Log_Return']
+            X = df[features].dropna()
+            y = df['Target'].loc[X.index]
+
+            self.model.fit(X, y)
+            joblib.dump(self.model, self.model_path)
+            logger.info("Makine Öğrenmesi Modeli başarıyla yeniden eğitildi ve kaydedildi.")
         except Exception as e:
-            logger.error(f"ML Predict Error: {e}")
+            logger.error(f"ML Eğitim Hatası: {e}")
+
+    def ml_veto(self, current_features: list) -> bool:
+        """Returns True if the ML model vetoes the signal (Probability < Threshold)."""
+        if not hasattr(self.model, "predict_proba"):
+            return False # Bypass if model not trained yet
+
+        try:
+            X_live = pd.DataFrame([current_features], columns=['RSI', 'Z_Score', 'ATR'])
+            prob_success = self.model.predict_proba(X_live)[0][1]
+
+            if prob_success < self.threshold:
+                return True # Veto!
+            return False # Approved
+        except Exception:
             return False
