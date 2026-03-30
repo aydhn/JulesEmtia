@@ -1,49 +1,55 @@
 import numpy as np
-from typing import List, Dict, Any
-from src.logger import get_logger
+import pandas as pd
+from typing import Dict, List
+from .logger import log_info, log_error
 
-logger = get_logger("monte_carlo")
-
-def run_monte_carlo(pnl_pcts: List[float], initial_balance: float = 10000.0, num_simulations: int = 10000) -> Dict[str, Any]:
-    """Runs a Monte Carlo simulation on historical trade returns to assess Risk of Ruin."""
-    if not pnl_pcts or len(pnl_pcts) < 20:
-        logger.warning("Not enough trade data for a reliable Monte Carlo simulation (Need > 20 trades).")
+def run_monte_carlo(trades: List[Dict], initial_balance: float = 10000, n_simulations: int = 10000) -> dict:
+    """
+    Monte Carlo Risk of Ruin & Stress Testing (Hızlı Numpy/Vektörel Motor).
+    Oluşmuş geçmiş işlemlerin rastgele sıralarla (replacement) binlerce kez simüle edilmesiyle
+    Kasanın İflas Riski (Risk of Ruin) ve Beklenen Maksimum Düşüşü (Drawdown) hesaplar.
+    """
+    if not trades or len(trades) < 20:
+        log_error("Monte Carlo için en az 20 kapalı işlem gereklidir.")
         return {}
 
+    pnl_pcts = np.array([trade.get('pnl_pct', trade.get('PnL_Pct', 0.0)) for trade in trades]) / 100.0
+
     n_trades = len(pnl_pcts)
-    returns_array = np.array(pnl_pcts)
 
-    # 1. Vectorized resampling with replacement
-    # Shape: (num_simulations, n_trades)
-    simulated_returns = np.random.choice(returns_array, size=(num_simulations, n_trades), replace=True)
+    # 1. Matris Oluşturma (10,000 simülasyon, n_trades satır)
+    # Numpy'ın ultra-hızlı rastgele seçim fonksiyonu (replace=True)
+    random_trades = np.random.choice(pnl_pcts, size=(n_simulations, n_trades), replace=True)
 
-    # 2. Convert to equity curves
-    # Add 1.0 to returns (e.g., 0.02 -> 1.02) and cumulative product
-    equity_curves = np.cumprod(1 + simulated_returns, axis=1) * initial_balance
+    # 2. Kümülatif Getiri (Compounding)
+    # (1 + PnL_Pct) matrisini oluşturup kümülatif çarpıyoruz.
+    growth_matrix = np.cumprod(1 + random_trades, axis=1) * initial_balance
 
-    # 3. Max Drawdown Calculation for each simulation
-    running_max = np.maximum.accumulate(equity_curves, axis=1)
-    drawdowns = (equity_curves - running_max) / running_max
-    max_drawdowns = np.min(drawdowns, axis=1) # The worst DD for each simulation
-
-    # 4. Final Equity for each simulation
-    final_equities = equity_curves[:, -1]
-
-    # 5. Extract Quant Metrics
-    expected_dd_95 = np.percentile(max_drawdowns, 5) # 5th percentile worst case
-    expected_dd_99 = np.percentile(max_drawdowns, 1) # 1st percentile worst case
-
-    # Risk of Ruin (Losing > 50% of initial balance)
+    # 3. İflas Riski (Risk of Ruin) - Kasa yarıya düşerse (veya sıfıra)
+    # Herhangi bir anda balance < initial_balance * 0.50 olanları bul
     ruin_threshold = initial_balance * 0.50
-    ruined_sims = np.sum(final_equities < ruin_threshold)
-    risk_of_ruin_pct = (ruined_sims / num_simulations) * 100
+    ruined_simulations = np.any(growth_matrix < ruin_threshold, axis=1)
+    risk_of_ruin_pct = np.mean(ruined_simulations) * 100
 
-    logger.info(f"Monte Carlo ({num_simulations} sims) -> RoR: {risk_of_ruin_pct:.2f}%, 99% MaxDD: {expected_dd_99:.2%}")
+    # 4. Maksimum Düşüş (Max Drawdown)
+    # Zirveden dibe düşüş (Peak to Trough)
+    peaks = np.maximum.accumulate(growth_matrix, axis=1)
+    drawdowns = (peaks - growth_matrix) / peaks
+    max_drawdowns = np.max(drawdowns, axis=1) # Her simülasyon için 1 adet max_dd
+
+    # 5. Güven Aralıkları (Confidence Intervals)
+    # %95 ve %99 olasılıkla yaşanacak en kötü senaryo
+    expected_mdd_95 = np.percentile(max_drawdowns, 95) * 100 # %95 güvenle Max DD
+    expected_mdd_99 = np.percentile(max_drawdowns, 99) * 100 # %99 güvenle Max DD
+
+    median_final_balance = np.median(growth_matrix[:, -1])
+
+    log_info(f"🎲 MONTE CARLO BİTTİ ({n_simulations} Simülasyon). İflas Riski: %{risk_of_ruin_pct:.2f}")
 
     return {
-        "Num_Simulations": num_simulations,
-        "Risk_Of_Ruin_Pct": risk_of_ruin_pct,
-        "Expected_MaxDD_95": expected_dd_95,
-        "Expected_MaxDD_99": expected_dd_99,
-        "Median_Final_Equity": np.median(final_equities)
+        "Simulations": n_simulations,
+        "RiskOfRuin_50Pct": risk_of_ruin_pct,
+        "ExpectedMaxDrawdown_95CI": expected_mdd_95,
+        "ExpectedMaxDrawdown_99CI": expected_mdd_99,
+        "MedianFinalBalance": median_final_balance
     }

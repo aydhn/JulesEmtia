@@ -1,114 +1,139 @@
 import sqlite3
 import os
-import datetime
-from typing import Dict, List, Any, Optional
-from src.logger import get_logger
+import json
+import uuid
+from datetime import datetime
+from .config import DB_PATH
+from .logger import log_info, log_error
 
-logger = get_logger("paper_db")
-
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "paper_db.sqlite3")
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+def _get_connection():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    return sqlite3.connect(DB_PATH)
 
 def init_db():
-    """Initializes the SQLite database with the required schema."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS trades (
-            trade_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker TEXT NOT NULL,
-            direction TEXT NOT NULL,
-            entry_time TEXT NOT NULL,
-            entry_price REAL NOT NULL,
-            sl_price REAL NOT NULL,
-            tp_price REAL NOT NULL,
-            position_size REAL NOT NULL,
-            status TEXT NOT NULL,
-            exit_time TEXT,
-            exit_price REAL,
-            pnl REAL,
-            comment TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
-    logger.info("Database initialized successfully.")
+    try:
+        conn = _get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS trades (
+                trade_id TEXT PRIMARY KEY,
+                ticker TEXT,
+                direction TEXT,
+                entry_time TEXT,
+                entry_price REAL,
+                sl_price REAL,
+                tp_price REAL,
+                position_size REAL,
+                status TEXT,
+                exit_time TEXT,
+                exit_price REAL,
+                pnl REAL
+            )
+        ''')
+        # Hesap durumu tablosu (Account Equity)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS account (
+                id INTEGER PRIMARY KEY,
+                balance REAL,
+                last_updated TEXT
+            )
+        ''')
+        # İlk bakiye (Eğer boşsa 10.000$ ile başlat)
+        cursor.execute('SELECT COUNT(*) FROM account')
+        if cursor.fetchone()[0] == 0:
+            cursor.execute('INSERT INTO account (balance, last_updated) VALUES (?, ?)',
+                           (10000.0, datetime.now().isoformat()))
+        conn.commit()
+    except Exception as e:
+        log_error(f"DB Kurulum Hatası: {e}")
+    finally:
+        conn.close()
 
-def open_trade(ticker: str, direction: str, entry_price: float, sl_price: float, tp_price: float, position_size: float, comment: str = "") -> int:
-    """Inserts a new open trade into the database and returns the trade_id."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    now = datetime.datetime.now().isoformat()
-    cursor.execute("""
-        INSERT INTO trades (ticker, direction, entry_time, entry_price, sl_price, tp_price, position_size, status, comment)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'Open', ?)
-    """, (ticker, direction, now, entry_price, sl_price, tp_price, position_size, comment))
-    trade_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    logger.info(f"Opened new trade #{trade_id} on {ticker} {direction} at {entry_price:.4f}")
-    return trade_id
+def open_trade(ticker: str, direction: str, entry_price: float, sl_price: float, tp_price: float, position_size: float) -> str:
+    trade_id = str(uuid.uuid4())
+    entry_time = datetime.now().isoformat()
+    try:
+        conn = _get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO trades (trade_id, ticker, direction, entry_time, entry_price, sl_price, tp_price, position_size, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Open')
+        ''', (trade_id, ticker, direction, entry_time, entry_price, sl_price, tp_price, position_size))
+        conn.commit()
+        return trade_id
+    except Exception as e:
+        log_error(f"İşlem Açılamadı ({ticker}): {e}")
+    finally:
+        conn.close()
 
-def close_trade(trade_id: int, exit_price: float, pnl: float, comment: str = "") -> bool:
-    """Closes an open trade and calculates the PNL."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    now = datetime.datetime.now().isoformat()
+def close_trade(trade_id: str, exit_price: float, pnl: float):
+    exit_time = datetime.now().isoformat()
+    try:
+        conn = _get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE trades
+            SET status = 'Closed', exit_time = ?, exit_price = ?, pnl = ?
+            WHERE trade_id = ?
+        ''', (exit_time, exit_price, pnl, trade_id))
 
-    # Get current comment to append
-    cursor.execute("SELECT comment FROM trades WHERE trade_id = ?", (trade_id,))
-    res = cursor.fetchone()
-    current_comment = res[0] if res else ""
-    new_comment = f"{current_comment} | Closed: {comment}".strip(" |")
+        # Bakiyeyi güncelle
+        cursor.execute('SELECT balance FROM account WHERE id = 1')
+        current_balance = cursor.fetchone()[0]
+        new_balance = current_balance + pnl
+        cursor.execute('UPDATE account SET balance = ?, last_updated = ? WHERE id = 1',
+                       (new_balance, exit_time))
+        conn.commit()
+    except Exception as e:
+        log_error(f"İşlem Kapatılamadı ({trade_id}): {e}")
+    finally:
+        conn.close()
 
-    cursor.execute("""
-        UPDATE trades
-        SET status = 'Closed', exit_time = ?, exit_price = ?, pnl = ?, comment = ?
-        WHERE trade_id = ? AND status = 'Open'
-    """, (now, exit_price, pnl, new_comment, trade_id))
+def get_open_trades() -> list:
+    try:
+        conn = _get_connection()
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM trades WHERE status = 'Open'")
+        return [dict(row) for row in cursor.fetchall()]
+    except Exception as e:
+        log_error(f"Açık İşlemler Çekilemedi: {e}")
+        return []
+    finally:
+        conn.close()
 
-    success = cursor.rowcount > 0
-    conn.commit()
-    conn.close()
-    if success:
-        logger.info(f"Closed trade #{trade_id} at {exit_price:.4f} with PNL: {pnl:.2f}")
-    return success
+def get_closed_trades() -> list:
+    try:
+        conn = _get_connection()
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM trades WHERE status = 'Closed' ORDER BY exit_time DESC")
+        return [dict(row) for row in cursor.fetchall()]
+    except Exception as e:
+        log_error(f"Kapalı İşlemler Çekilemedi: {e}")
+        return []
+    finally:
+        conn.close()
 
-def update_sl_price(trade_id: int, new_sl: float) -> bool:
-    """Updates the stop-loss price for trailing stops or breakeven."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        UPDATE trades
-        SET sl_price = ?
-        WHERE trade_id = ? AND status = 'Open'
-    """, (new_sl, trade_id))
-    success = cursor.rowcount > 0
-    conn.commit()
-    conn.close()
-    if success:
-        logger.debug(f"Updated SL for trade #{trade_id} to {new_sl:.4f}")
-    return success
+def update_sl_price(trade_id: str, new_sl: float):
+    try:
+        conn = _get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE trades SET sl_price = ? WHERE trade_id = ?", (new_sl, trade_id))
+        conn.commit()
+    except Exception as e:
+        log_error(f"Stop-Loss Güncellenemedi ({trade_id}): {e}")
+    finally:
+        conn.close()
 
-def get_open_trades() -> List[Dict[str, Any]]:
-    """Returns a list of all currently open trades."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM trades WHERE status = 'Open'")
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
-
-def get_closed_trades() -> List[Dict[str, Any]]:
-    """Returns a list of all closed trades for performance reporting."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM trades WHERE status = 'Closed'")
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
-
-# Run init on import
-init_db()
+def get_account_balance() -> float:
+    try:
+        conn = _get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT balance FROM account WHERE id = 1")
+        return cursor.fetchone()[0]
+    except Exception as e:
+        log_error(f"Bakiye Okunamadı: {e}")
+        return 10000.0  # Fallback
+    finally:
+        conn.close()

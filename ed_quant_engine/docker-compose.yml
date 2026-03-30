@@ -1,21 +1,24 @@
-version: '3.8'
+version: "3.8"
 
 services:
   quant_engine:
     build: .
     container_name: ed_quant_engine
-    restart: always
+    restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      - TZ=Europe/Istanbul # Phase 25: Timezone Sync
-      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
-      - ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
+      - TZ=Europe/Istanbul  # Senkronizasyon için kritik
     volumes:
-      # Phase 25: Volume mapping to ensure Data Persistence across restarts
-      - ./paper_db.sqlite3:/app/paper_db.sqlite3
-      - ./logs:/app/logs
-      - ./models:/app/models
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"\n
+      - ./data:/app/data        # Veritabanı korunur
+      - ./logs:/app/logs        # Loglar takip edilebilir
+      - ./models:/app/models    # ML Model ve Optimizasyonlar
+      - ./reports:/app/reports  # Rapor Çıktıları
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+        reservations:
+          cpus: '0.2'
+          memory: 512M

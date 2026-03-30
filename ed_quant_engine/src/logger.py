@@ -1,37 +1,48 @@
 import logging
 import os
 from logging.handlers import RotatingFileHandler
-from datetime import datetime
-from dotenv import load_dotenv
+import sys
 
-load_dotenv()
+# Konfigürasyonu buradan alıyoruz (dosya yolları vs)
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from config import LOG_DIR
 
-# Log dizini
-LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
+# Log dizinini oluştur
 os.makedirs(LOG_DIR, exist_ok=True)
-log_file = os.path.join(LOG_DIR, f"ed_quant_{datetime.now().strftime('%Y-%m')}.log")
+LOG_FILE = os.path.join(LOG_DIR, "ed_quant_engine.log")
 
-# Format
-formatter = logging.Formatter('%(asctime)s | %(levelname)-8s | [%(module)s] %(message)s')
+# Logger Yapılandırması
+logger = logging.getLogger("EDQuantEngine")
+logger.setLevel(logging.INFO)
 
-# Rotating File Handler: Max 5MB, keep 3 backups
-file_handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3)
-file_handler.setFormatter(formatter)
-
-# Console Handler
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(formatter)
-
-# Logger Initialization
-logger = logging.getLogger("ED_Quant")
-log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
-log_level = getattr(logging, log_level_str, logging.INFO)
-logger.setLevel(log_level)
-
+# Eğer handler zaten varsa tekrar ekleme
 if not logger.handlers:
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
+    # Format
+    formatter = logging.Formatter(
+        "[%(asctime)s] [%(levelname)s] [%(module)s]: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
 
-def get_logger(module_name: str) -> logging.Logger:
-    """Returns a logger instance specifically named for the module calling it."""
-    return logger.getChild(module_name)
+    # Console Handler
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+
+    # File Handler (Rotating, Max 5MB, 3 Yedek)
+    fh = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=3)
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+
+def log_info(msg: str):
+    logger.info(msg)
+
+def log_error(msg: str):
+    logger.error(msg)
+
+def log_warning(msg: str):
+    logger.warning(msg)
+
+def log_critical(msg: str):
+    logger.critical(msg)

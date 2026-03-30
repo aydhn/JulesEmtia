@@ -4,90 +4,67 @@ import numpy as np
 import time
 import asyncio
 from typing import Dict, List, Optional
-from src.logger import get_logger
+from .logger import log_info, log_error, log_warning
 
-logger = get_logger("data_loader")
-
-# Master Trading Universe
-UNIVERSE = {
-    # Precious Metals
-    "GC=F": "Gold", "SI=F": "Silver", "HG=F": "Copper", "PA=F": "Palladium", "PL=F": "Platinum",
-    # Energy
-    "CL=F": "Crude Oil WTI", "BZ=F": "Brent Oil", "NG=F": "Natural Gas", "RB=F": "Gasoline RBOB", "HO=F": "Heating Oil",
-    # Agriculture / Softs
-    "ZW=F": "Wheat", "ZC=F": "Corn", "ZS=F": "Soybeans", "KC=F": "Coffee", "CC=F": "Cocoa", "SB=F": "Sugar", "CT=F": "Cotton", "LE=F": "Live Cattle",
-    # TRY based Forex
-    "USDTRY=X": "USD/TRY", "EURTRY=X": "EUR/TRY", "GBPTRY=X": "GBP/TRY", "JPYTRY=X": "JPY/TRY", "CNHTRY=X": "CNH/TRY", "CHFTRY=X": "CHF/TRY", "AUDTRY=X": "AUD/TRY"
-}
-
-def fetch_ticker_data_sync(ticker: str, period: str = "2y", interval: str = "1d", retries: int = 3) -> pd.DataFrame:
-    """Synchronous fetch with exponential backoff for a single ticker."""
+def fetch_data_sync(ticker: str, period: str = "60d", interval: str = "1h", retries: int = 3) -> Optional[pd.DataFrame]:
+    """
+    yfinance üzerinden veri çeken Exponential Backoff korumalı senkron metod.
+    """
     for attempt in range(retries):
         try:
             df = yf.download(ticker, period=period, interval=interval, progress=False)
             if df.empty:
-                logger.warning(f"Empty dataframe returned for {ticker} ({interval}).")
-                return pd.DataFrame()
+                log_warning(f"[{ticker}] Veri boş döndü. (Deneme {attempt+1}/{retries})")
+                time.sleep(2 ** attempt)
+                continue
 
-            # Clean MultiIndex columns if returned by yfinance v0.2.x+
+            # Eğer columns MultiIndex ise (yfinance 0.2.37 bazen yapabiliyor), Flatten
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.droplevel(1)
 
-            # Handle NaN / Missing values
-            df = df.ffill().bfill()
-
-            # Drop timezone information to avoid lookahead merge issues later
-            if df.index.tz is not None:
-                df.index = df.index.tz_localize(None)
-
+            # Nan yönetimi (Forward fill) ve indeks temizliği
+            df.ffill(inplace=True)
+            df.dropna(inplace=True) # İlk satırlardaki temizlenemeyen nan'lar için
+            df.index = df.index.tz_localize(None) # Zaman dilimi tutarsızlığını önlemek için tz strip
             return df
         except Exception as e:
-            wait_time = (2 ** attempt) * 2
-            logger.error(f"Error fetching {ticker} ({interval}) attempt {attempt+1}/{retries}: {e}. Retrying in {wait_time}s...")
-            time.sleep(wait_time)
+            log_error(f"[{ticker}] API Hatası: {e} (Deneme {attempt+1}/{retries})")
+            time.sleep(2 ** attempt)
 
-    logger.critical(f"Failed to fetch {ticker} data after {retries} attempts.")
-    return pd.DataFrame()
+    log_error(f"[{ticker}] Veri çekilemedi. Max retry sayısına ulaşıldı.")
+    return None
 
-async def fetch_universe_async(interval: str = "1d", period: str = "2y") -> Dict[str, pd.DataFrame]:
-    """Asynchronously fetches data for the entire universe to optimize I/O and prevent rate limits."""
-    results = {}
+async def fetch_data_async(ticker: str, period: str = "60d", interval: str = "1h", retries: int = 3) -> Optional[pd.DataFrame]:
+    """
+    Senkron metodu asyncio evreninde bloklamadan çalıştıran Async Wrapper.
+    """
+    return await asyncio.to_thread(fetch_data_sync, ticker, period, interval, retries)
 
-    async def fetch_task(ticker):
-        # Using asyncio.to_thread to wrap synchronous yfinance calls
-        try:
-            # Stagger start slightly to avoid API rate limiting bursts
-            await asyncio.sleep(np.random.uniform(0.1, 1.0))
-            df = await asyncio.to_thread(fetch_ticker_data_sync, ticker, period, interval)
-            if not df.empty:
-                results[ticker] = df
-        except Exception as e:
-            logger.error(f"Async fetch failed for {ticker}: {e}")
+async def load_universe_mtf(tickers: List[str]) -> Dict[str, Dict[str, pd.DataFrame]]:
+    """
+    Tüm evrenin Günlük (HTF) ve Saatlik (LTF) verilerini asenkron olarak çeker.
+    Dönüş formatı: {"GC=F": {"1d": df_daily, "1h": df_hourly}}
+    """
+    log_info(f"{len(tickers)} adet varlık için MTF (1D ve 1H) veri çekimi başlatılıyor...")
+    universe_data = {}
 
-    tasks = [fetch_task(ticker) for ticker in UNIVERSE.keys()]
-    await asyncio.gather(*tasks)
+    # İki ayrı görev listesi
+    tasks_1d = [fetch_data_async(t, period="2y", interval="1d") for t in tickers]
+    tasks_1h = [fetch_data_async(t, period="60d", interval="1h") for t in tickers]
 
-    logger.info(f"Successfully fetched {len(results)}/{len(UNIVERSE)} assets for {interval} timeframe.")
-    return results
+    # Asenkron bekleme
+    results_1d = await asyncio.gather(*tasks_1d)
+    results_1h = await asyncio.gather(*tasks_1h)
 
-def align_mtf_data(df_ltf: pd.DataFrame, df_htf: pd.DataFrame) -> pd.DataFrame:
-    """Aligns High Timeframe (HTF) data to Low Timeframe (LTF) to prevent lookahead bias."""
-    if df_htf.empty or df_ltf.empty:
-        return df_ltf
+    # Sözlüğe doldurma
+    for i, ticker in enumerate(tickers):
+        if results_1d[i] is not None and results_1h[i] is not None:
+            universe_data[ticker] = {
+                "1d": results_1d[i],
+                "1h": results_1h[i]
+            }
+        else:
+            log_warning(f"[{ticker}] MTF verileri eksik olduğu için işleme alınmayacak.")
 
-    # Crucial Rule: Shift HTF by 1 before merging. We only know yesterday's close TODAY.
-    df_htf_shifted = df_htf.shift(1).copy()
-
-    # Suffix HTF columns to differentiate them
-    df_htf_shifted.columns = [f"{col}_HTF" for col in df_htf_shifted.columns]
-
-    # Merge As Of backwards to match closest HTF timestamps to LTF without looking ahead
-    merged = pd.merge_asof(
-        df_ltf.sort_index(),
-        df_htf_shifted.sort_index(),
-        left_index=True,
-        right_index=True,
-        direction='backward'
-    )
-
-    return merged
+    log_info(f"{len(universe_data)} varlığın MTF verisi başarıyla çekildi.")
+    return universe_data

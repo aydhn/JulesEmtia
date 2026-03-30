@@ -1,11 +1,23 @@
-yfinance==0.2.36
-pandas==2.2.0
-numpy==1.26.3
-pandas_ta==0.3.14
-scikit-learn==1.4.0
+# Data & Math
+numpy==1.26.4
+pandas==2.2.1
+yfinance==0.2.37
+
+# Technical Analysis
+pandas-ta==0.3.14b0
+
+# Machine Learning
+scikit-learn==1.4.1
+
+# NLP & Sentiment
 nltk==3.8.1
 feedparser==6.0.11
-python-telegram-bot==20.7
+
+# Notifications & Automation
+python-telegram-bot==20.8
 schedule==1.2.1
-matplotlib==3.8.2
-pdfkit==1.0.0\n
+
+# Reporting
+matplotlib==3.8.3
+seaborn==0.13.2
+pdfkit==1.0.0

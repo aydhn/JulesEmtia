@@ -1,39 +1,49 @@
-# ED Capital Quant Engine 🚀
+# ED Capital Quant Engine
 
-Kurumsal Düzey Algoritmik Ticaret ve Portföy Yönetim Motoru.
-Düşük Frekans, Yüksek İsabet Oranı, Katı Risk Yönetimi.
+Profesyonel, tamamen otonom ve **SIFIR BÜTÇE** ile çalışan algoritmik bir işlem (Quant Trading) motorudur. Bu sistem, **Yüksek Win-Rate (İsabet Oranı)** ve **Katı Risk Yönetimi (JP Morgan Standardı)** hedeflenerek tasarlanmıştır. Yalnızca ücretsiz API'ler ve Python kütüphaneleri kullanılarak inşa edilmiştir.
 
-## Özellikler
-- **MTF (Multi-Timeframe) Analizi:** Günlük trend, Saatlik giriş. (Sıfır Lookahead Bias)
-- **Dinamik Risk Yönetimi:** ATR tabanlı İzleyen Stop (Trailing Stop) ve Başa Baş (Breakeven).
-- **Yapay Zeka ve NLP:** Random Forest ile sinyal doğrulaması, NLTK VADER ile RSS Haber duyarlılık vetosu.
-- **Kesirli Kelly Kriteri (Fractional Kelly):** Kazanma olasılığına göre matematiksel kasa boyutlandırma.
-- **Siyah Kuğu Koruması (VIX & Z-Score):** Piyasa çöktüğünde otomatik kapanan "Devre Kesiciler".
-- **Broker Abstraction:** SOLID prensipleriyle sanal (Paper) ve gerçek borsalar (Live) arası anında geçiş.
-- **Docker Ready:** %100 izole, Volume Mapping ile kalıcı veri.
+## Mimari & Özellikler (25 Fazlık Tam Kapsam)
+1. **Çoklu Zaman Dilimi (MTF) Analizi**: Günlük (HTF) ana trend onayı olmadan Saatlik (LTF) sinyaller filtrelenir.
+2. **Makine Öğrenmesi (Machine Learning)**: Random Forest algoritması ile düşük olasılıklı sinyaller vetolanır (Otonom hafta sonu eğitimi).
+3. **Doğal Dil İşleme (NLP & Sentiment)**: RSS haber başlıkları VADER ile analiz edilir, makroekonomik duyarlılığa ters düşen sinyaller reddedilir.
+4. **Devre Kesiciler (Black Swan)**: VIX endeksi fırladığında veya Z-Score tabanlı ani çöküş (Flash Crash) tespit edildiğinde yeni işlemler dondurulur, açık pozisyonlar acil korumaya alınır.
+5. **Dinamik Kelly Kriteri**: Kasa büyüklüğü ve geçmiş performansa (Win Rate, PnL oranı) dayalı agresif olmayan (Kesirli Kelly) pozisyon boyutlandırma.
+6. **Gerçekçi Maliyet Simülasyonu**: Volatilite (ATR) tabanlı dinamik fiyat kayması (Slippage) ve enstrümana özel Spread makasları giriş/çıkış fiyatlarına net olarak yansıtılır.
+7. **Korelasyon Matrisi**: Aynı yönde ve yüksek korelasyonlu çiftlerde riskin katlanmasını engelleyen veto mekanizması.
+8. **Başa Baş & İzleyen Stop**: Kâra geçen pozisyonlarda Zarar Kes (SL) seviyesi anaparayı koruyacak şekilde giriş fiyatına veya piyasa arkasından ileriye doğru sürüklenir. Asla geriye çekilmez.
+9. **Broker Soyutlama (Abstract Base Class)**: Sistemin ana beyni ile veri tabanı/borsa emir iletimi tamamen ayrıştırılmıştır (SPL Düzey 3 Uyumlu). Canlı borsa bağlantılarına dakikalar içinde entegre edilebilir.
+10. **Telegram ile Çift Yönlü İletişim**: Anlık rapor alma, sistemi duraklatma (`/durdur`) veya acil çıkış (`/kapat_hepsi`) gibi kritik emirler güvenli bir şekilde Telegram üzerinden yönetilir.
+11. **Monte Carlo Stres Testi**: 10.000 simülasyon ile sistemin "İflas Riski" (Risk of Ruin) ve %99 Güven Aralığında Beklenen Maksimum Düşüşü hesaplanır ve PDF/HTML kurumsal raporlarına işlenir.
+12. **Docker Entegrasyonu**: Kendi başına izole bir konteyner olarak, SQLite hacim eşleşmesiyle birlikte kalıcı veri tutarak 7/24 çalışır.
 
 ## Kurulum ve Çalıştırma
 
-### 1. Ortam Değişkenleri
-Proje dizininde `.env` dosyası oluşturun:
-```bash
-TELEGRAM_TOKEN=your_bot_token_here
-ADMIN_CHAT_ID=your_chat_id_here
+### Gereksinimler
+- Python 3.10+
+- Docker ve Docker Compose (Opsiyonel ama tavsiye edilir)
+- Telegram Bot Token ve Chat ID (BotFather üzerinden alınır)
+
+### 1. Ortam Değişkenlerini (Env) Ayarlama
+Proje kök dizininde bir `.env` dosyası oluşturun ve bilgilerinizi girin:
+```env
+TELEGRAM_TOKEN=123456789:ABCDefGHiJklMNOpQRsTuVwxYZ
+ADMIN_CHAT_ID=987654321
+TZ=Europe/Istanbul
 ```
 
-### 2. Docker Compose İle Çalıştırma
+### 2. Docker Üzerinden Başlatma (Önerilen)
+Yönetim betiğini çalıştırılabilir yapın ve Docker ile derleyin:
 ```bash
 chmod +x manage_bot.sh
-./manage_bot.sh start
+./manage_bot.sh docker-deploy
 ```
 
-### 3. Logları İzleme
+### 3. Yerel Makinede Başlatma (Systemd veya Tmux)
 ```bash
-./manage_bot.sh logs
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python main.py
 ```
 
-## Güvenlik Duvarı
-Bu motor SPL Düzey 3 güvenlik kurallarına göre çalışır:
-- DXY/TNX artışlarında gelişmekte olan piyasalara risk alınmaz.
-- Pozisyon korelasyonları .75 üzerindeyse riske girilmez.
-- `paper_db.sqlite3` Host makineye bağlanmıştır, konteyner silinse bile data kaybolmaz.\n
+*ED Capital Quant Engine, otonom portföy yönetiminin geleceğidir. Geliştirilen bu kod ekosistemi %100 Pythonik, asenkron ve modüler bir mimariyle örülmüştür.*
