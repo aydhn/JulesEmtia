@@ -1,13 +1,14 @@
 version: '3.8'
 services:
-  quant_engine:
+  ed_quant_engine:
     build: .
-    container_name: edcapital_quant
+    container_name: ed_quant_engine
     restart: always
     environment:
       - TZ=Europe/Istanbul
-    env_file:
-      - .env
     volumes:
-      - ./data:/app/data
+      # Veri Kalıcılığı: Konteyner çökse de DB ve Model silinmez!
+      - ./paper_db.sqlite3:/app/paper_db.sqlite3
       - ./logs:/app/logs
+      - ./rf_model.pkl:/app/rf_model.pkl
+      - ./.env:/app/.env:ro

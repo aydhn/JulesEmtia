@@ -1,13 +1,15 @@
 [Unit]
-Description=ED Capital Quant Engine (Docker Compose Service)
-Requires=docker.service
-After=docker.service
+Description=ED Capital Quant Engine
+After=network.target
 
 [Service]
-Restart=always
+Type=simple
+User=root
 WorkingDirectory=/opt/ed_quant_engine
-ExecStart=/usr/local/bin/docker-compose up
-ExecStop=/usr/local/bin/docker-compose down
+ExecStart=/opt/ed_quant_engine/manage_bot.sh start
+ExecStop=/opt/ed_quant_engine/manage_bot.sh stop
+Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

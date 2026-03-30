@@ -1,33 +1,21 @@
 #!/bin/bash
-
-# management script for docker or systemd
-
-ACTION=$1
-
-case "$ACTION" in
+chmod +x "$0"
+case "$1" in
     start)
-        echo "Starting ED Quant Engine via Docker Compose..."
+        touch paper_db.sqlite3 rf_model.pkl
+        mkdir -p logs
         docker-compose up -d --build
         ;;
     stop)
-        echo "Stopping ED Quant Engine..."
         docker-compose down
-        ;;
-    restart)
-        echo "Restarting ED Quant Engine..."
-        docker-compose down
-        docker-compose up -d --build
         ;;
     logs)
-        echo "Tailing logs..."
-        docker-compose logs -f
+        docker-compose logs -f --tail=100
         ;;
     status)
-        echo "Checking status..."
         docker-compose ps
         ;;
     *)
-        echo "Usage: $0 {start|stop|restart|logs|status}"
-        return 1
+        echo "Kullanım: $0 {start|stop|logs|status}"
         ;;
 esac
