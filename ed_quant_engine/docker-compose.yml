@@ -1,14 +1,24 @@
 version: '3.8'
+
 services:
-  ed_quant_engine:
+  quant_engine:
     build: .
-    container_name: ed_quant_engine
-    restart: always
+    image: ed_quant_engine:latest
+    container_name: ed_quant_bot
+    restart: unless-stopped
     environment:
       - TZ=Europe/Istanbul
+      - LOG_LEVEL=INFO
+    env_file:
+      - .env
     volumes:
-      # Veri Kalıcılığı: Konteyner çökse de DB ve Model silinmez!
-      - ./paper_db.sqlite3:/app/paper_db.sqlite3
+      # Persistent Data Mapping to Host
+      - ./data:/app/data
       - ./logs:/app/logs
-      - ./rf_model.pkl:/app/rf_model.pkl
-      - ./.env:/app/.env:ro
+      - ./models:/app/models
+      - ./reports:/app/reports
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
