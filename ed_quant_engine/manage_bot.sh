@@ -1,43 +1,61 @@
 #!/bin/bash
-# Phase 9 & 25: Management Script & Docker Deployment
 
-DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-cd "$DIR"
+# ED Capital Quant Engine Management Script
 
-function show_help {
-    echo "Usage: ./manage_bot.sh [start|stop|restart|logs|status]"
+set -e
+
+# Project paths
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+COMPOSE_FILE="$DIR/docker-compose.yml"
+
+print_help() {
+    echo "ED Capital Quant Engine Management"
+    echo "Usage: ./manage_bot.sh [command]"
+    echo ""
     echo "Commands:"
-    echo "  start   - Builds and starts the Docker container in detached mode."
-    echo "  stop    - Stops and removes the Docker container safely."
-    echo "  restart - Stops, rebuilds, and restarts the container."
-    echo "  logs    - Tails the Docker logs."
-    echo "  status  - Checks if the container is running."
+    echo "  start     Start the bot in the background (Docker)"
+    echo "  stop      Stop the bot"
+    echo "  restart   Restart the bot"
+    echo "  logs      Follow the bot logs"
+    echo "  status    Show container status"
+    echo "  build     Rebuild the Docker image"
+    echo "  update    Rebuild and restart"
 }
 
 case "$1" in
     start)
         echo "Starting ED Capital Quant Engine..."
-        docker-compose up -d --build
-        echo "Container started. Run './manage_bot.sh logs' to view output."
+        docker-compose -f "$COMPOSE_FILE" up -d
+        echo "Bot started successfully."
         ;;
     stop)
         echo "Stopping ED Capital Quant Engine..."
-        docker-compose down
-        echo "Container stopped safely."
+        docker-compose -f "$COMPOSE_FILE" down
+        echo "Bot stopped."
         ;;
     restart)
         echo "Restarting ED Capital Quant Engine..."
-        docker-compose down
-        docker-compose up -d --build
-        echo "Container restarted."
+        docker-compose -f "$COMPOSE_FILE" restart
+        echo "Bot restarted."
         ;;
     logs)
-        docker-compose logs -f --tail=100
+        docker-compose -f "$COMPOSE_FILE" logs -f --tail=100
         ;;
     status)
-        docker-compose ps
+        docker-compose -f "$COMPOSE_FILE" ps
+        ;;
+    build)
+        echo "Building Docker image..."
+        docker-compose -f "$COMPOSE_FILE" build
+        ;;
+    update)
+        echo "Updating bot..."
+        docker-compose -f "$COMPOSE_FILE" build
+        docker-compose -f "$COMPOSE_FILE" down
+        docker-compose -f "$COMPOSE_FILE" up -d
+        echo "Update completed."
         ;;
     *)
-        show_help
+        print_help
         ;;
 esac

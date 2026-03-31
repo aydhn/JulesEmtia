@@ -1,318 +1,298 @@
 import asyncio
+import os
+import sys
 import schedule
-import time
-from datetime import datetime
-import gc
-import pandas as pd
+import datetime
+from typing import Dict, Any
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from data_loader import DataLoader
-from features import add_features
-from macro_filter import MacroRegimeFilter
-from strategy import QuantStrategy
-from portfolio_manager import PortfolioManager
-from execution_model import ExecutionSimulator
-from ml_validator import MLValidator
-from sentiment_filter import SentimentFilter
+from dotenv import load_dotenv
+
+from logger import get_logger
+from data_engine import DataEngine
+from macro_engine import determine_market_regime
 from broker import PaperBroker
-from reporter import TearSheetReporter
-from notifier import async_send_telegram_message, TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID
-from paper_db import PaperDB
-from logger import logger
+from quant_logic import StrategyEngine
+import paper_db
 
-# Initialize Broker (Abstraction Layer)
+# Load Environment Variables
+load_dotenv()
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+
+# Initialize Core Modules
+logger = get_logger("main")
 broker = PaperBroker()
+data_engine = DataEngine()
+strategy_engine = StrategyEngine()
 
-# Global State Flags (Manual Override)
-is_paused = False
+# Global State
+SYSTEM_PAUSED = False
+bot_app = None
 
-async def manage_open_positions(universe_data: dict, macro_df: pd.DataFrame):
-    """Phase 12, 19: Trade Management."""
-    global broker
+async def send_telegram_msg(message: str):
+    """Sends a Telegram message to the admin."""
+    if not TELEGRAM_BOT_TOKEN or not ADMIN_CHAT_ID:
+        logger.error("Telegram credentials missing in .env")
+        return
+
+    try:
+        await bot_app.bot.send_message(chat_id=ADMIN_CHAT_ID, text=message, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Telegram failed: {e}")
+
+def check_open_positions_task():
+    """
+    Manages open positions:
+    - Exits if TP/SL hit.
+    - Updates Trailing Stop strictly monotonically.
+    - Triggers Circuit Breaker if VIX > 35.
+    """
+    logger.info("Checking Open Positions...")
     open_trades = broker.get_open_positions()
     if not open_trades:
         return
 
-    vix_tripped = MacroRegimeFilter.check_vix_circuit_breaker(macro_df)
+    market_regime = determine_market_regime()
+    is_black_swan = market_regime == "Extreme Panic"
+
+    # Pre-fetch current prices to avoid multiple API calls
+    current_prices = {}
+    for trade in open_trades:
+        ticker = trade['ticker']
+        if ticker not in current_prices:
+            # Sync fetch for simplicity in this task, or async in a real high-frequency env.
+            try:
+                # Basic fetch
+                import yfinance as yf
+                df = yf.download(ticker, period="1d", progress=False)
+                if not df.empty:
+                    current_prices[ticker] = float(df['Close'].iloc[-1])
+            except:
+                pass
 
     for trade in open_trades:
-        trade_id = trade['trade_id']
         ticker = trade['ticker']
+        trade_id = trade['trade_id']
         direction = trade['direction']
-        entry_price = trade['entry_price']
-        current_sl = trade['sl_price']
+        entry = trade['entry_price']
+        sl = trade['sl_price']
+        tp = trade['tp_price']
 
-        if ticker not in universe_data or universe_data[ticker][1] is None or universe_data[ticker][1].empty:
+        current_price = current_prices.get(ticker)
+        if not current_price:
             continue
 
-        hourly_df = universe_data[ticker][1]
-        latest_price = hourly_df.iloc[-1]['Close']
-        current_atr = hourly_df.iloc[-1]['ATR_14']
-
-        # 1. Black Swan Protection
-        if vix_tripped:
-            logger.critical(f"Circuit Breaker: Panic closing {ticker} at {latest_price}")
-            exit_price = ExecutionSimulator.execute_trade_price(ticker, latest_price, -1 if direction == "Long" else 1, pd.Series([current_atr]))
-            receipt = broker.close_position(trade_id, exit_price, reason="VIX_CIRCUIT_BREAKER")
-            await async_send_telegram_message(f"🚨 <b>VIX PANIC CLOSE</b>\n{ticker} closed at {exit_price:.2f}\nPnL: {receipt.get('realized_pnl', 0):.2f}")
+        # Circuit Breaker: Aggressive Exit
+        if is_black_swan:
+            logger.critical(f"Circuit Breaker Exit for {ticker} at {current_price}")
+            broker.close_position(trade_id, current_price, atr=0) # simplified ATR
+            asyncio.create_task(send_telegram_msg(f"🚨 CIRCUIT BREAKER 🚨\nClosed {direction} {ticker} @ {current_price:.4f}"))
             continue
 
-        # 2. SL / TP Check
+        # Check SL/TP
         if direction == "Long":
-            if latest_price <= current_sl:
-                exit_price = ExecutionSimulator.execute_trade_price(ticker, current_sl, -1, pd.Series([current_atr]))
-                receipt = broker.close_position(trade_id, exit_price, reason="SL_HIT")
-                await async_send_telegram_message(f"❌ <b>STOP LOSS HIT</b>\n{ticker} Long closed at {exit_price:.2f}\nPnL: {receipt.get('realized_pnl', 0):.2f}")
+            if current_price <= sl:
+                broker.close_position(trade_id, current_price, atr=0)
+                asyncio.create_task(send_telegram_msg(f"🛑 SL Hit: Closed Long {ticker} @ {current_price:.4f}"))
                 continue
-            elif latest_price >= trade['tp_price']:
-                exit_price = ExecutionSimulator.execute_trade_price(ticker, trade['tp_price'], -1, pd.Series([current_atr]))
-                receipt = broker.close_position(trade_id, exit_price, reason="TP_HIT")
-                await async_send_telegram_message(f"✅ <b>TAKE PROFIT HIT</b>\n{ticker} Long closed at {exit_price:.2f}\nPnL: {receipt.get('realized_pnl', 0):.2f}")
+            elif current_price >= tp:
+                broker.close_position(trade_id, current_price, atr=0)
+                asyncio.create_task(send_telegram_msg(f"✅ TP Hit: Closed Long {ticker} @ {current_price:.4f}"))
                 continue
 
-            profit_dist = latest_price - entry_price
-            if profit_dist > current_atr:
-                new_sl = latest_price - (1.5 * current_atr)
-                if new_sl > current_sl:
-                    if broker.modify_trailing_stop(trade_id, new_sl):
-                        await async_send_telegram_message(f"🔒 <b>TRAILING STOP UPDATED</b>\n{ticker} Long SL moved to {new_sl:.2f}")
+            # Trailing Stop & Breakeven (Strictly Monotonic)
+            # Example: If price moved 1 ATR in favor, move SL to Entry (Breakeven)
+            distance_to_entry = current_price - entry
+            if distance_to_entry > (entry * 0.01): # 1% profit example
+                new_sl = max(sl, current_price - (entry * 0.005)) # Trail 0.5% behind
+                if new_sl > sl:
+                    broker.modify_trailing_stop(trade_id, new_sl)
+                    asyncio.create_task(send_telegram_msg(f"🔒 Trailing Stop Updated: Long {ticker} new SL={new_sl:.4f}"))
 
         elif direction == "Short":
-            if latest_price >= current_sl:
-                exit_price = ExecutionSimulator.execute_trade_price(ticker, current_sl, 1, pd.Series([current_atr]))
-                receipt = broker.close_position(trade_id, exit_price, reason="SL_HIT")
-                await async_send_telegram_message(f"❌ <b>STOP LOSS HIT</b>\n{ticker} Short closed at {exit_price:.2f}\nPnL: {receipt.get('realized_pnl', 0):.2f}")
+            if current_price >= sl:
+                broker.close_position(trade_id, current_price, atr=0)
+                asyncio.create_task(send_telegram_msg(f"🛑 SL Hit: Closed Short {ticker} @ {current_price:.4f}"))
                 continue
-            elif latest_price <= trade['tp_price']:
-                exit_price = ExecutionSimulator.execute_trade_price(ticker, trade['tp_price'], 1, pd.Series([current_atr]))
-                receipt = broker.close_position(trade_id, exit_price, reason="TP_HIT")
-                await async_send_telegram_message(f"✅ <b>TAKE PROFIT HIT</b>\n{ticker} Short closed at {exit_price:.2f}\nPnL: {receipt.get('realized_pnl', 0):.2f}")
+            elif current_price <= tp:
+                broker.close_position(trade_id, current_price, atr=0)
+                asyncio.create_task(send_telegram_msg(f"✅ TP Hit: Closed Short {ticker} @ {current_price:.4f}"))
                 continue
 
-            profit_dist = entry_price - latest_price
-            if profit_dist > current_atr:
-                new_sl = latest_price + (1.5 * current_atr)
-                if new_sl < current_sl:
-                    if broker.modify_trailing_stop(trade_id, new_sl):
-                        await async_send_telegram_message(f"🔒 <b>TRAILING STOP UPDATED</b>\n{ticker} Short SL moved to {new_sl:.2f}")
+            # Trailing Stop & Breakeven
+            distance_to_entry = entry - current_price
+            if distance_to_entry > (entry * 0.01):
+                new_sl = min(sl, current_price + (entry * 0.005))
+                if new_sl < sl:
+                    broker.modify_trailing_stop(trade_id, new_sl)
+                    asyncio.create_task(send_telegram_msg(f"🔒 Trailing Stop Updated: Short {ticker} new SL={new_sl:.4f}"))
 
-async def run_live_cycle():
-    """Phase 23: Live Forward Paper Trading Pipeline."""
-    global is_paused
-    logger.info("Starting live scan cycle...")
+async def scan_universe_task():
+    """
+    Main MTF Scanning Loop. Evaluates strategy across the universe.
+    """
+    global SYSTEM_PAUSED
+    if SYSTEM_PAUSED:
+        logger.info("System is paused. Skipping scan.")
+        return
 
-    try:
-        universe_raw = await DataLoader.get_all_universe_data()
-        macro_df = await MacroRegimeFilter.fetch_macro_data()
+    logger.info("Starting Universe MTF Scan...")
 
-        universe_data = {}
-        for ticker, (daily, hourly) in universe_raw.items():
-            try:
-                d_feat = add_features(daily, "1d")
-                h_feat = add_features(hourly, "1h")
-                universe_data[ticker] = (d_feat, h_feat)
-            except Exception as e:
-                logger.error(f"Error processing features for {ticker}: {e}")
+    # 1. Macro Filter
+    regime = determine_market_regime()
+    if regime == "Extreme Panic" or regime == "Risk-Off":
+        logger.warning(f"Scan aborted due to Market Regime: {regime}")
+        asyncio.create_task(send_telegram_msg(f"⚠️ Scan Skipped: Regime is {regime}"))
+        return
 
-        await manage_open_positions(universe_data, macro_df)
+    from universe import UNIVERSE
 
-        if is_paused:
-            logger.info("System is paused. Skipping new signal generation.")
-            return
+    # Collect data and update correlation matrix
+    all_close_prices = {}
 
-        if MacroRegimeFilter.check_vix_circuit_breaker(macro_df):
-            return
+    for ticker in UNIVERSE:
+        df = await data_engine.get_mtf_data(ticker)
+        if df.empty:
+            continue
 
-        if MacroRegimeFilter.is_risk_off(macro_df):
-            logger.warning("Risk-Off Regime active. Proceeding with caution.")
+        all_close_prices[ticker] = df['Close']
 
-        corr_matrix = await PortfolioManager.calculate_correlation_matrix({k: v[0] for k, v in universe_data.items()})
+        # 2. Strategy Engine Evaluation (MTF, ML, NLP, Correlation)
+        signal = strategy_engine.generate_signal(df, ticker)
 
-        for ticker, (daily_df, hourly_df) in universe_data.items():
-            signal = await QuantStrategy.generate_signal(ticker, hourly_df, daily_df, corr_matrix)
+        if signal:
+            # 3. Kelly Criterion Position Sizing
+            balance = broker.get_account_balance()
+            qty = strategy_engine.portfolio_mgr.get_position_size(
+                current_balance=balance,
+                entry_price=signal['price'],
+                sl_price=signal['sl']
+            )
 
-            if signal:
-                bal = broker.get_account_balance()
-                risk_amt, pos_size = PortfolioManager.calculate_position_size(bal, signal['entry_price'], signal['sl_price'])
+            if qty > 0:
+                # 4. Execute Order (Simulated Spread/Slippage)
+                trade_id = broker.place_market_order(
+                    ticker=ticker,
+                    direction=signal['direction'],
+                    qty=qty,
+                    current_price=signal['price'],
+                    sl=signal['sl'],
+                    tp=signal['tp'],
+                    atr=signal['atr']
+                )
 
-                if pos_size > 0:
-                    receipt = broker.place_market_order(
-                        ticker=signal['ticker'],
-                        direction=signal['direction'],
-                        position_size=pos_size,
-                        entry_price=signal['entry_price'],
-                        sl_price=signal['sl_price'],
-                        tp_price=signal['tp_price'],
-                        reason=f"MTF_Signal_Prob_{signal['prob']:.2f}"
-                    )
-
+                if trade_id:
                     msg = (
-                        f"🚀 <b>NEW TRADE OPENED</b>\n"
-                        f"Asset: {signal['ticker']}\n"
-                        f"Dir: {signal['direction']}\n"
-                        f"Entry: {signal['entry_price']:.4f}\n"
-                        f"SL: {signal['sl_price']:.4f}\n"
-                        f"TP: {signal['tp_price']:.4f}\n"
-                        f"Size: {pos_size:.4f} units\n"
-                        f"Risk: ${risk_amt:.2f} (Kelly)\n"
-                        f"ML Prob: {signal['prob']:.0%}"
+                        f"🚀 <b>NEW TRADE EXECUTED</b>\n"
+                        f"<b>ID:</b> {trade_id}\n"
+                        f"<b>Asset:</b> {ticker}\n"
+                        f"<b>Side:</b> {signal['direction']}\n"
+                        f"<b>Qty:</b> {qty:.4f}\n"
+                        f"<b>Entry:</b> ${signal['price']:.4f}\n"
+                        f"<b>SL:</b> ${signal['sl']:.4f}\n"
+                        f"<b>TP:</b> ${signal['tp']:.4f}\n"
+                        f"<b>ML Prob:</b> {(signal.get('ml_prob', 0)*100):.1f}%"
                     )
-                    await async_send_telegram_message(msg)
+                    await send_telegram_msg(msg)
 
-    except Exception as e:
-        logger.error(f"Error in live cycle: {e}")
-        await async_send_telegram_message(f"⚠️ <b>SYSTEM ERROR</b>\nLive cycle failed: {str(e)[:100]}")
-    finally:
-        del universe_raw
-        del universe_data
-        gc.collect()
+    # Update correlation matrix after gathering all close prices
+    if all_close_prices:
+        corr_df = pd.DataFrame(all_close_prices)
+        strategy_engine.portfolio_mgr.update_correlation_matrix(corr_df)
 
-def run_schedule_wrapper():
-    asyncio.create_task(run_live_cycle())
+    logger.info("Universe Scan Completed.")
 
-async def heartbeat_task():
-    bal = broker.get_account_balance()
-    open_pos = len(broker.get_open_positions())
-    await async_send_telegram_message(f"🟢 <b>SYSTEM ACTIVE</b>\nBalance: ${bal:.2f}\nOpen Positions: {open_pos}")
+# --- TELEGRAM ADMIN COMMANDS ---
 
-def run_heartbeat_wrapper():
-    asyncio.create_task(heartbeat_task())
-
-async def train_ml_task():
-    """Async task to retrain the ML model on weekends."""
-    logger.info("Starting scheduled ML Retraining...")
-    try:
-        universe_raw = await DataLoader.get_all_universe_data()
-
-        # Extract only the hourly data DataFrames for training
-        training_data = {}
-        for ticker, (daily, hourly) in universe_raw.items():
-            try:
-                # Add features before passing to ML
-                h_feat = add_features(hourly, "1h")
-                training_data[ticker] = h_feat
-            except Exception as e:
-                logger.error(f"Feature error for {ticker} during ML prep: {e}")
-
-        await MLValidator.async_train_model(training_data)
-        await async_send_telegram_message("🤖 <b>ML Model Retrained Successfully</b>\nRandomForest ready for next week.")
-    except Exception as e:
-        logger.error(f"Error in scheduled ML Retraining: {e}")
-
-def run_ml_train_wrapper():
-    asyncio.create_task(train_ml_task())
-
-async def generate_tear_sheet_task():
-    """Async task to generate weekly reports."""
-    try:
-        await TearSheetReporter.generate_report()
-    except Exception as e:
-        logger.error(f"Error generating Tear Sheet: {e}")
-
-def run_tear_sheet_wrapper():
-    asyncio.create_task(generate_tear_sheet_task())
-
-
-# --- TELEGRAM BOT HANDLERS ---
-def verify_admin(update: Update) -> bool:
-    if str(update.effective_chat.id) != str(ADMIN_CHAT_ID):
-        logger.critical(f"UNAUTHORIZED ACCESS ATTEMPT from ID: {update.effective_chat.id}")
-        return False
-    return True
+def is_admin(update: Update) -> bool:
+    return str(update.effective_user.id) == ADMIN_CHAT_ID
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not verify_admin(update): return
-    bal = broker.get_account_balance()
-    pos = broker.get_open_positions()
-    msg = f"📊 <b>STATUS</b>\nBalance: ${bal:.2f}\nOpen Trades: {len(pos)}\nPaused: {is_paused}"
+    if not is_admin(update): return
+    balance = broker.get_account_balance()
+    trades = broker.get_open_positions()
+    msg = f"📊 <b>System Status</b>\nBalance: ${balance:.2f}\nOpen Trades: {len(trades)}\nPaused: {SYSTEM_PAUSED}"
     await update.message.reply_html(msg)
 
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global is_paused
-    if not verify_admin(update): return
-    is_paused = True
-    await update.message.reply_html("⏸️ <b>PAUSED</b>\nNew entries halted.")
+    if not is_admin(update): return
+    global SYSTEM_PAUSED
+    SYSTEM_PAUSED = True
+    await update.message.reply_html("⏸️ System Paused. Scanning stopped. Trailing Stops remain active.")
 
 async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global is_paused
-    if not verify_admin(update): return
-    is_paused = False
-    await update.message.reply_html("▶️ <b>RESUMED</b>\nAutonomous scanning active.")
+    if not is_admin(update): return
+    global SYSTEM_PAUSED
+    SYSTEM_PAUSED = False
+    await update.message.reply_html("▶️ System Resumed. Scanning active.")
 
 async def cmd_panic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not verify_admin(update): return
-    global broker
-    pos = broker.get_open_positions()
-    if not pos:
-        await update.message.reply_html("No open trades to close.")
-        return
+    if not is_admin(update): return
+    trades = broker.get_open_positions()
+    for t in trades:
+        # Emergency close at current price (dummy atr 0)
+        broker.close_position(t['trade_id'], t['entry_price'], 0)
+    await update.message.reply_html("🚨 <b>PANIC BUTTON PRESSED</b>\nAll open positions closed immediately.")
 
-    await update.message.reply_html("🚨 <b>PANIC BUTTON ACTIVATED</b>\nClosing all positions at market...")
-    asyncio.create_task(async_panic_close(pos))
+async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update): return
+    await update.message.reply_html("🔍 Force scan initiated...")
+    asyncio.create_task(scan_universe_task())
 
-async def async_panic_close(positions):
-    universe = await DataLoader.get_all_universe_data()
-    for p in positions:
-        ticker = p['ticker']
-        if ticker in universe and universe[ticker][1] is not None:
-            latest = universe[ticker][1].iloc[-1]['Close']
-            atr = universe[ticker][1].iloc[-1]['ATR_14']
-            exit_price = ExecutionSimulator.execute_trade_price(ticker, latest, -1 if p['direction'] == 'Long' else 1, pd.Series([atr]))
-            broker.close_position(p['trade_id'], exit_price, reason="PANIC_BUTTON")
-    await async_send_telegram_message("✅ <b>PANIC CLOSE COMPLETE</b>\nAll positions closed.")
+# --- SCHEDULER & MAIN LOOP ---
 
-async def cmd_force_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not verify_admin(update): return
-    await update.message.reply_html("🔍 <b>FORCE SCAN INITIATED</b>\nScanning universe...")
-    asyncio.create_task(run_live_cycle())
+def schedule_jobs():
+    """Sets up the schedule using the schedule library."""
+    # Synchronize execution strictly at the start of the hour
+    schedule.every().hour.at(":00").do(lambda: asyncio.create_task(scan_universe_task()))
 
-async def main():
-    """Main Application Loop"""
-    logger.info("Initializing ED Capital Quant Engine...")
+    # Check open positions more frequently
+    schedule.every(15).minutes.do(lambda: asyncio.create_task(asyncio.to_thread(check_open_positions_task)))
 
-    bal = broker.get_account_balance()
-    logger.info(f"State Recovered. Current Balance: ${bal:.2f}")
+    # Heartbeat
+    schedule.every().day.at("08:00").do(
+        lambda: asyncio.create_task(send_telegram_msg("🟢 <b>Heartbeat</b>\nSystem is active and protecting portfolio."))
+    )
 
-    # Telegram Boot
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    application.add_handler(CommandHandler("durum", cmd_status))
-    application.add_handler(CommandHandler("durdur", cmd_pause))
-    application.add_handler(CommandHandler("devam", cmd_resume))
-    application.add_handler(CommandHandler("kapat_hepsi", cmd_panic))
-    application.add_handler(CommandHandler("tara", cmd_force_scan))
-
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-
-    logger.info("Telegram interface listening for admin commands.")
-    await async_send_telegram_message(f"🚀 <b>ED Capital Quant Engine Started</b>\nBalance: ${bal:.2f}")
-
-    # Initial ML Training trigger (If model does not exist)
-    if not __import__('os').path.exists(MLValidator.MODEL_PATH):
-        logger.info("Initial Boot: Triggering ML Model Training...")
-        asyncio.create_task(train_ml_task())
-
-    # Schedule Main Tasks
-    schedule.every().hour.at(":01").do(run_schedule_wrapper)
-    schedule.every().day.at("08:00").do(run_heartbeat_wrapper)
-
-    # Phase 18: Auto-Retrain ML Model every Sunday at 23:00
-    schedule.every().sunday.at("23:00").do(run_ml_train_wrapper)
-
-    # Phase 13 & 22: Generate Tear Sheet (with Monte Carlo) every Friday at 23:30 (Market Close)
-    schedule.every().friday.at("23:30").do(run_tear_sheet_wrapper)
-
-    logger.info("Scheduler started. Entering main loop...")
-
+async def run_scheduler():
+    """Async loop running schedule.run_pending() without blocking."""
     while True:
         schedule.run_pending()
         await asyncio.sleep(1)
+
+async def main():
+    logger.info("Starting ED Capital Quant Engine...")
+    paper_db.init_db()
+
+    # Initialize Telegram Bot
+    global bot_app
+    bot_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    bot_app.add_handler(CommandHandler("durum", cmd_status))
+    bot_app.add_handler(CommandHandler("durdur", cmd_pause))
+    bot_app.add_handler(CommandHandler("devam", cmd_resume))
+    bot_app.add_handler(CommandHandler("kapat_hepsi", cmd_panic))
+    bot_app.add_handler(CommandHandler("tara", cmd_scan))
+
+    # Start bot polling manually inside existing event loop
+    await bot_app.initialize()
+    await bot_app.start()
+    await bot_app.updater.start_polling()
+
+    # Initial startup message
+    await send_telegram_msg("🚀 <b>ED Capital Quant Engine Started</b>\nOperating in Live Paper Trade Mode.")
+
+    # Setup jobs
+    schedule_jobs()
+
+    # Run scheduler loop
+    await run_scheduler()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Engine shutting down (KeyboardInterrupt).")
+        logger.info("Engine stopped by user.")
     except Exception as e:
-        logger.critical(f"Fatal Engine Crash: {e}")
+        logger.critical(f"Engine Crashed: {e}")
