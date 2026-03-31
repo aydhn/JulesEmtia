@@ -1,0 +1,6 @@
+2026-03-31 11:21:34,855 - PaperDB - INFO - Veritabanı başlatılıyor: paper_db.sqlite3
+2026-03-31 11:21:34,865 - PaperDB - INFO - Veritabanı şeması doğrulandı.
+2026-03-31 11:21:39,798 - PaperBroker - INFO - Sanal Broker (PaperBroker) Başlatıldı. Bakiye: 10000.0
+2026-03-31 11:27:04,852 - PaperDB - INFO - Veritabanı başlatılıyor: paper_db.sqlite3
+2026-03-31 11:27:04,854 - PaperDB - INFO - Veritabanı şeması doğrulandı.
+2026-03-31 11:27:08,205 - PaperBroker - INFO - Sanal Broker (PaperBroker) Başlatıldı. Bakiye: 10000.0

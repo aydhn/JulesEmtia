@@ -1,42 +1,30 @@
 import pandas as pd
-from typing import Dict, Any
+from logger import setup_logger
 
-def calculate_slippage_and_spread(ticker: str, current_price: float, atr: float, direction: str, is_entry: bool = True) -> float:
-    """Calculates realistic dynamic spread and slippage execution costs based on Phase 21 specifications."""
-    # Define base spreads by asset class (as percentage of price)
-    base_spreads = {
-        "GC=F": 0.0002,      # 0.02% for Major Precious Metals
-        "SI=F": 0.0004,      # 0.04% for Silver
-        "CL=F": 0.0005,      # 0.05% for Oil
-        "USDTRY=X": 0.0010,  # 0.10% for Exotic/EM Forex
-        "EURTRY=X": 0.0012   # 0.12% for Cross Exotic
-    }
+logger = setup_logger("ExecutionModel")
 
-    spread_pct = base_spreads.get(ticker, 0.0005) # Default 0.05% spread
+def get_base_spread(ticker: str) -> float:
+    """Returns base spread as a percentage of price based on asset class."""
+    if ticker in ["GC=F", "CL=F"]: # Major Commodities
+        return 0.0002 # 0.02%
+    elif ticker in ["SI=F", "HG=F"]: # Minor Commodities
+        return 0.0005 # 0.05%
+    elif "TRY=X" in ticker: # Exotic Forex
+        return 0.0010 # 0.10%
+    return 0.0003
 
-    # Base Slippage Model (Assume 0.05% base slip, scaling with ATR)
-    base_slippage_pct = 0.0005
+def calculate_slippage_and_spread(ticker: str, current_price: float, current_atr: float) -> float:
+    """
+    Phase 21: Calculates dynamic execution cost combining Base Spread + ATR-adjusted Slippage.
+    Returns the absolute price difference to be added/subtracted.
+    """
+    base_spread_pct = get_base_spread(ticker)
+    spread_cost = current_price * (base_spread_pct / 2)
 
-    # We lack historical ATR series here for relative ATR,
-    # so we'll use a simplified model where slippage increases linearly if ATR > 1% of price
-    atr_pct = atr / current_price if current_price > 0 else 0
-    volatility_multiplier = 1.0
+    # Dynamic Slippage: 5% of ATR
+    slippage_cost = current_atr * 0.05
 
-    if atr_pct > 0.01:
-        # High Volatility -> Wider slippage
-        volatility_multiplier = atr_pct / 0.01
+    total_cost = spread_cost + slippage_cost
+    logger.debug(f"Maliyet Simülasyonu [{ticker}]: Spread={spread_cost:.4f}, Slippage={slippage_cost:.4f}, Toplam={total_cost:.4f}")
 
-    dynamic_slippage_pct = base_slippage_pct * volatility_multiplier
-
-    # Total Execution Cost (Percentage)
-    total_cost_pct = (spread_pct / 2.0) + dynamic_slippage_pct
-
-    # Calculate Executed Price
-    if (direction == "Long" and is_entry) or (direction == "Short" and not is_entry):
-        # We pay the offer (higher price) when buying, or covering a short
-        executed_price = current_price * (1 + total_cost_pct)
-    else:
-        # We sell the bid (lower price) when shorting, or exiting a long
-        executed_price = current_price * (1 - total_cost_pct)
-
-    return executed_price
+    return total_cost
