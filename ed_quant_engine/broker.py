@@ -1,33 +1,29 @@
 from abc import ABC, abstractmethod
+from typing import Dict, Any, List, Optional
 import datetime
-from typing import Dict, Any, List
-from paper_db import PaperDB
-from logger import logger
+import paper_db
+from execution_model import simulate_execution_cost
+from logger import get_logger
+
+logger = get_logger("broker")
 
 class BaseBroker(ABC):
-    """
-    Phase 24: Broker Abstraction Layer (SPL Level 3 Standards)
-    Decouples strategy execution from broker API.
-    Provides methods for Paper or Live Trading (e.g. InteractiveBrokers, Binance).
-    Ensures strict Audit Trails for derivatives trading.
-    """
+    """Abstract Base Class for Broker Abstraction Layer (SOLID)."""
 
     @abstractmethod
     def get_account_balance(self) -> float:
         pass
 
     @abstractmethod
-    def place_market_order(self, ticker: str, direction: str, position_size: float, entry_price: float, sl_price: float, tp_price: float, reason: str = "") -> Dict[str, Any]:
-        """Returns execution receipt."""
+    def place_market_order(self, ticker: str, direction: str, qty: float, current_price: float, sl: float, tp: float, atr: float, avg_atr: float = None) -> Optional[int]:
         pass
 
     @abstractmethod
-    def modify_trailing_stop(self, trade_id: int, new_sl_price: float) -> bool:
+    def close_position(self, trade_id: int, exit_price: float, atr: float, avg_atr: float = None) -> bool:
         pass
 
     @abstractmethod
-    def close_position(self, trade_id: int, exit_price: float, reason: str = "TP/SL") -> Dict[str, Any]:
-        """Returns execution receipt with realized PnL."""
+    def modify_trailing_stop(self, trade_id: int, new_sl: float) -> bool:
         pass
 
     @abstractmethod
@@ -36,105 +32,113 @@ class BaseBroker(ABC):
 
 
 class PaperBroker(BaseBroker):
-    """
-    Simulated Broker using local SQLite Database.
-    Wraps all PaperDB operations.
-    Generates Audit Trails (Execution Receipts) required for Quant architecture.
-    """
+    """Local simulation broker connected to SQLite."""
+
+    def __init__(self):
+        paper_db.init_db()
+        logger.info("PaperBroker initialized.")
 
     def get_account_balance(self) -> float:
-        return PaperDB.get_balance()
+        return paper_db.get_balance()
 
-    def place_market_order(self, ticker: str, direction: str, position_size: float, entry_price: float, sl_price: float, tp_price: float, reason: str = "") -> Dict[str, Any]:
-        """
-        Simulates market order execution with Slippage & Spread considered.
-        Logs an Audit Trail receipt.
-        """
-        # Execute trade
-        PaperDB.execute_query(
-            '''
-            INSERT INTO trades (ticker, direction, entry_time, entry_price, sl_price, tp_price, position_size, status, reason)
-            VALUES (?, ?, datetime('now', 'localtime'), ?, ?, ?, ?, 'Open', ?)
-            ''',
-            (ticker, direction, entry_price, sl_price, tp_price, position_size, reason)
+    def place_market_order(
+        self,
+        ticker: str,
+        direction: str,
+        qty: float,
+        current_price: float,
+        sl: float,
+        tp: float,
+        atr: float,
+        avg_atr: float = None
+    ) -> Optional[int]:
+        """Places an order with SPL Level 3 compatible audit trail logging."""
+
+        # Simulate execution costs (Spread + Slippage)
+        executed_price, spread_cost, slippage_cost = simulate_execution_cost(
+            ticker=ticker, price=current_price, direction=direction, atr=atr, avg_atr=avg_atr
         )
 
-        # Audit Trail Receipt
-        receipt = {
-            "order_id": PaperDB.execute_query("SELECT last_insert_rowid() as id").fetchone()['id'],
-            "ticker": ticker,
-            "direction": direction,
-            "position_size": position_size,
-            "entry_price": entry_price,
-            "sl_price": sl_price,
-            "tp_price": tp_price,
-            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "status": "FILLED"
+        # Adjust SL and TP based on executed price to maintain Risk/Reward ratios
+        # (Simplified: keeping raw SL/TP, but logging the worse entry)
+
+        trade_data = {
+            'ticker': ticker,
+            'direction': direction,
+            'entry_time': datetime.datetime.now().isoformat(),
+            'entry_price': executed_price,
+            'sl_price': sl,
+            'tp_price': tp,
+            'position_size': qty
         }
 
-        logger.info(f"AUDIT TRAIL: Order Filled. Receipt: {receipt}")
-        return receipt
+        trade_id = paper_db.open_trade(trade_data)
 
-    def modify_trailing_stop(self, trade_id: int, new_sl_price: float) -> bool:
-        """Updates SL price if the new SL is better (Strictly Monotonic)."""
-        # Verify it's an open trade
-        trade = PaperDB.fetch_one("SELECT sl_price, direction FROM trades WHERE trade_id = ?", (trade_id,))
+        # Audit Trail Log
+        if trade_id:
+            logger.info(
+                f"[AUDIT TRAIL] Order Executed | ID: {trade_id} | {direction} {qty} {ticker} | "
+                f"Market: {current_price:.4f} | Executed: {executed_price:.4f} | "
+                f"Slippage/Spread Cost: ${(abs(executed_price - current_price) * qty):.2f}"
+            )
+
+        return trade_id
+
+    def close_position(self, trade_id: int, exit_price: float, atr: float, avg_atr: float = None) -> bool:
+        """Closes position, applies execution costs to the exit, calculates PnL."""
+        open_trades = self.get_open_positions()
+        trade = next((t for t in open_trades if t['trade_id'] == trade_id), None)
+
+        if not trade:
+            logger.error(f"Cannot close trade {trade_id}: Not found or already closed.")
+            return False
+
+        direction = trade['direction']
+        qty = trade['position_size']
+        entry_price = trade['entry_price']
+
+        # Reverse direction for closing to calculate costs correctly
+        close_direction = "Short" if direction == "Long" else "Long"
+
+        executed_exit_price, spread_cost, slippage_cost = simulate_execution_cost(
+            ticker=trade['ticker'], price=exit_price, direction=close_direction, atr=atr, avg_atr=avg_atr
+        )
+
+        # Calculate PnL
+        if direction == "Long":
+            pnl = (executed_exit_price - entry_price) * qty
+        else: # Short
+            pnl = (entry_price - executed_exit_price) * qty
+
+        exit_time = datetime.datetime.now().isoformat()
+        paper_db.close_trade(trade_id, exit_time, executed_exit_price, pnl)
+
+        logger.info(
+            f"[AUDIT TRAIL] Position Closed | ID: {trade_id} | PnL: ${pnl:.2f} | "
+            f"Market Exit: {exit_price:.4f} | Executed Exit: {executed_exit_price:.4f}"
+        )
+
+        return True
+
+    def modify_trailing_stop(self, trade_id: int, new_sl: float) -> bool:
+        """Updates trailing stop strictly monotonic (only in favor of trade)."""
+        open_trades = self.get_open_positions()
+        trade = next((t for t in open_trades if t['trade_id'] == trade_id), None)
+
         if not trade:
             return False
 
-        current_sl = trade['sl_price']
         direction = trade['direction']
+        current_sl = trade['sl_price']
 
-        # Stop-Loss can only move in the direction of profit
-        if direction == 'Long' and new_sl_price > current_sl:
-            PaperDB.execute_query("UPDATE trades SET sl_price = ? WHERE trade_id = ?", (new_sl_price, trade_id))
-            logger.info(f"Trailing Stop updated for Trade ID {trade_id}: {current_sl} -> {new_sl_price}")
-            return True
-        elif direction == 'Short' and new_sl_price < current_sl:
-            PaperDB.execute_query("UPDATE trades SET sl_price = ? WHERE trade_id = ?", (new_sl_price, trade_id))
-            logger.info(f"Trailing Stop updated for Trade ID {trade_id}: {current_sl} -> {new_sl_price}")
-            return True
+        # Strictly monotonic check
+        if direction == "Long" and new_sl <= current_sl:
+            return False # SL can only go up
+        if direction == "Short" and new_sl >= current_sl:
+            return False # SL can only go down
 
-        return False
-
-    def close_position(self, trade_id: int, exit_price: float, reason: str = "TP/SL Hit") -> Dict[str, Any]:
-        """
-        Closes a position, calculates PnL, updates balance, and logs receipt.
-        """
-        trade = PaperDB.fetch_one("SELECT ticker, direction, entry_price, position_size FROM trades WHERE trade_id = ?", (trade_id,))
-        if not trade:
-            return {}
-
-        direction = 1 if trade['direction'] == 'Long' else -1
-        pnl = (exit_price - trade['entry_price']) * trade['position_size'] * direction
-
-        # Optional: Add simulated funding or commissions here for Net PnL
-        net_pnl = pnl # Gross PnL for now, assuming spread/slippage handled at execution price calculation
-
-        PaperDB.execute_query(
-            '''
-            UPDATE trades
-            SET status = 'Closed', exit_time = datetime('now', 'localtime'), exit_price = ?, pnl = ?, net_pnl = ?, reason = ?
-            WHERE trade_id = ?
-            ''',
-            (exit_price, pnl, net_pnl, reason, trade_id)
-        )
-
-        # Update Balance
-        PaperDB.update_balance(net_pnl)
-
-        receipt = {
-            "order_id": trade_id,
-            "ticker": trade['ticker'],
-            "exit_price": exit_price,
-            "realized_pnl": net_pnl,
-            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "status": "CLOSED"
-        }
-
-        logger.info(f"AUDIT TRAIL: Position Closed. Receipt: {receipt}")
-        return receipt
+        paper_db.update_sl_price(trade_id, new_sl)
+        return True
 
     def get_open_positions(self) -> List[Dict[str, Any]]:
-        rows = PaperDB.fetch_all("SELECT * FROM trades WHERE status = 'Open'")
-        return [dict(row) for row in rows]
+        return paper_db.get_open_trades()

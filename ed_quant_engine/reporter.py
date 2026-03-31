@@ -1,172 +1,201 @@
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 import os
 import datetime
-from jinja2 import Template
-from paper_db import PaperDB
-from monte_carlo import MonteCarloRisk
-from logger import logger
-from notifier import async_send_telegram_message
+from logger import get_logger
+import paper_db
 
-class TearSheetReporter:
-    """
-    Phase 13 & 22: Corporate Reporting & Performance Summary (Tear Sheet).
-    Generates professional HTML/PDF reports following ED Capital standards.
-    Integrates Monte Carlo Stress Testing metrics.
-    """
+logger = get_logger("reporter")
 
-    REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'reports')
-    os.makedirs(REPORTS_DIR, exist_ok=True)
+class ReportGenerator:
+    """Generates ED Capital Corporate Standard Performance Reports."""
 
-    @classmethod
-    def get_closed_trades_df(cls) -> pd.DataFrame:
-        rows = PaperDB.fetch_all("SELECT * FROM trades WHERE status = 'Closed' ORDER BY exit_time ASC")
-        df = pd.DataFrame([dict(row) for row in rows])
+    def __init__(self):
+        os.makedirs("reports", exist_ok=True)
+        # Corporate Styling
+        plt.style.use('dark_background')
+        sns.set_palette("muted")
 
-        if not df.empty:
-            df['exit_time'] = pd.to_datetime(df['exit_time'])
-            df['net_pnl'] = pd.to_numeric(df['net_pnl'])
-
-        return df
-
-    @classmethod
-    def calculate_metrics(cls, df: pd.DataFrame) -> dict:
+    def _calculate_metrics(self, df: pd.DataFrame) -> dict:
         if df.empty:
-            return {"Total PnL": 0.0, "Win Rate": "0.0%", "Profit Factor": "0.0", "Max Drawdown": "0.0%"}
+            return {}
 
-        total_pnl = df['net_pnl'].sum()
-        wins = df[df['net_pnl'] > 0]
-        losses = df[df['net_pnl'] <= 0]
+        wins = df[df['pnl'] > 0]
+        losses = df[df['pnl'] <= 0]
 
+        total_pnl = df['pnl'].sum()
         win_rate = len(wins) / len(df) if len(df) > 0 else 0
 
-        gross_profit = wins['net_pnl'].sum()
-        gross_loss = abs(losses['net_pnl'].sum())
-        profit_factor = gross_profit / gross_loss if gross_loss != 0 else float('inf')
+        gross_profit = wins['pnl'].sum()
+        gross_loss = abs(losses['pnl'].sum())
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
 
-        start_bal = float(os.getenv("PAPER_STARTING_BALANCE", 10000.0))
-        df['Equity'] = start_bal + df['net_pnl'].cumsum()
+        avg_win = wins['pnl'].mean() if not wins.empty else 0
+        avg_loss = losses['pnl'].mean() if not losses.empty else 0
 
-        df['Peak'] = df['Equity'].cummax()
-        df['Drawdown'] = (df['Equity'] - df['Peak']) / df['Peak']
-        max_dd = df['Drawdown'].min() * 100
+        # Max Drawdown Calculation
+        df['cumulative_pnl'] = df['pnl'].cumsum()
+        df['peak'] = df['cumulative_pnl'].cummax()
+        df['drawdown'] = df['cumulative_pnl'] - df['peak']
+        max_drawdown = df['drawdown'].min()
 
-        metrics = {
-            "Total PnL": f"${total_pnl:.2f}",
-            "Win Rate": f"{win_rate:.1%}",
-            "Profit Factor": f"{profit_factor:.2f}",
-            "Max Drawdown": f"{max_dd:.2f}%",
-            "Avg Win": f"${wins['net_pnl'].mean():.2f}" if not wins.empty else "$0.0",
-            "Avg Loss": f"${losses['net_pnl'].mean():.2f}" if not losses.empty else "$0.0"
+        return {
+            "Total PnL": total_pnl,
+            "Win Rate": win_rate,
+            "Profit Factor": profit_factor,
+            "Max Drawdown": max_drawdown,
+            "Avg Win": avg_win,
+            "Avg Loss": avg_loss,
+            "Total Trades": len(df)
         }
 
-        # Phase 22: Integrate Monte Carlo Metrics
-        mc_results = MonteCarloRisk.run_simulation(n_simulations=10000)
-        metrics.update(mc_results)
+    def run_monte_carlo(self, df: pd.DataFrame, simulations: int = 10000) -> dict:
+        """Runs Fast Numpy Vectorized Monte Carlo Stress Test."""
+        if len(df) < 10:
+            return {"99% Expected Drawdown": 0, "Risk of Ruin": 0}
 
-        return metrics
+        returns = df['pnl'].values
+        n_trades = len(returns)
 
-    @classmethod
-    def generate_equity_curve(cls, df: pd.DataFrame, filepath: str):
-        if df.empty: return
+        # Vectorized resampling: Matrix of shape (simulations, n_trades)
+        simulated_paths = np.random.choice(returns, size=(simulations, n_trades), replace=True)
 
-        start_bal = float(os.getenv("PAPER_STARTING_BALANCE", 10000.0))
-        df['Equity'] = start_bal + df['net_pnl'].cumsum()
+        # Cumulative PnL paths
+        cumulative_paths = np.cumsum(simulated_paths, axis=1)
 
-        plt.figure(figsize=(10, 5))
-        plt.plot(df['exit_time'], df['Equity'], color='#003366', linewidth=2)
-        plt.fill_between(df['exit_time'], df['Equity'], start_bal, alpha=0.1, color='#003366')
-        plt.axhline(y=start_bal, color='gray', linestyle='--', alpha=0.5)
+        # Max Drawdowns for each path
+        peaks = np.maximum.accumulate(cumulative_paths, axis=1)
+        drawdowns = cumulative_paths - peaks
+        max_drawdowns = np.min(drawdowns, axis=1) # Negative values
 
-        plt.title('ED Capital - Kümülatif Getiri Eğrisi', fontsize=14, fontweight='bold', color='#003366')
-        plt.xlabel('Tarih')
-        plt.ylabel('Portföy Değeri ($)')
-        plt.grid(True, alpha=0.3)
+        # 99% Confidence Interval Expected Drawdown (Percentile 1% because it's negative)
+        expected_drawdown_99 = np.percentile(max_drawdowns, 1)
+
+        # Risk of Ruin: Probability of losing 50% of starting capital (assuming 10k start)
+        ruin_threshold = -5000.0
+        ruin_count = np.sum(np.any(cumulative_paths <= ruin_threshold, axis=1))
+        risk_of_ruin = (ruin_count / simulations) * 100
+
+        logger.info(f"Monte Carlo: 99% Drawdown = ${expected_drawdown_99:.2f}, Risk of Ruin = {risk_of_ruin:.2f}%")
+
+        return {
+            "99% Expected Drawdown": expected_drawdown_99,
+            "Risk of Ruin": risk_of_ruin
+        }
+
+    def generate_html_report(self):
+        """Generates a standalone HTML Tear Sheet."""
+        raw_trades = paper_db.get_closed_trades()
+        if not raw_trades:
+            logger.warning("No closed trades to report.")
+            return None
+
+        df = pd.DataFrame(raw_trades)
+        df['exit_time'] = pd.to_datetime(df['exit_time'])
+        df = df.sort_values('exit_time')
+
+        metrics = self._calculate_metrics(df)
+        mc_risk = self.run_monte_carlo(df)
+
+        # --- Generate Equity Curve ---
+        plt.figure(figsize=(10, 4))
+        plt.plot(df['exit_time'], df['cumulative_pnl'], color='cyan', linewidth=2)
+        plt.fill_between(df['exit_time'], df['cumulative_pnl'], color='cyan', alpha=0.1)
+        plt.title('ED Capital - Kümülatif Getiri (Equity Curve)', color='white')
+        plt.xlabel('Tarih', color='gray')
+        plt.ylabel('PnL ($)', color='gray')
+        plt.grid(True, alpha=0.2)
         plt.tight_layout()
-        plt.savefig(filepath)
+        chart_path = "reports/equity_curve.png"
+        plt.savefig(chart_path, facecolor='#1e1e1e')
         plt.close()
 
-    @classmethod
-    async def generate_report(cls) -> str:
-        logger.info("Generating Weekly Tear Sheet with Monte Carlo Risk Metrics...")
-
-        df = cls.get_closed_trades_df()
-        metrics = cls.calculate_metrics(df)
-
-        eq_curve_path = os.path.join(cls.REPORTS_DIR, 'equity_curve.png')
-        cls.generate_equity_curve(df, eq_curve_path)
-
-        html_template = """
+        # HTML Template Generation
+        html_content = f"""
         <html>
         <head>
+            <title>ED Capital Quant Engine - Performans Raporu</title>
             <style>
-                body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #333; margin: 40px; background-color: #f4f6f9; }
-                .container { max-width: 1200px; margin: auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-                .header { border-bottom: 3px solid #003366; padding-bottom: 15px; margin-bottom: 30px; text-align: center; }
-                h1 { color: #003366; margin: 0; font-size: 28px; text-transform: uppercase; letter-spacing: 1px; }
-                .subtitle { color: #666; font-size: 16px; margin-top: 5px; }
-                h2 { color: #003366; border-bottom: 2px solid #eee; padding-bottom: 8px; margin-top: 40px; }
-                .metrics-container { display: flex; flex-wrap: wrap; gap: 20px; justify-content: space-between; margin-bottom: 40px; }
-                .metric-card { background: #fff; padding: 20px; border-radius: 8px; text-align: center; flex: 1 1 calc(33.333% - 20px); box-shadow: 0 2px 5px rgba(0,0,0,0.05); border: 1px solid #eaeaea; }
-                .metric-card h3 { margin: 0 0 10px 0; color: #555; font-size: 14px; text-transform: uppercase; }
-                .metric-card h2 { margin: 0; color: #003366; font-size: 24px; border: none; padding: 0; }
-                .risk-section .metric-card { background: #fff8f8; border-color: #ffcccc; }
-                .risk-section .metric-card h2 { color: #cc0000; }
-                .img-container { text-align: center; margin-top: 40px; }
-                img { max-width: 100%; height: auto; border-radius: 4px; border: 1px solid #ddd; }
-                .footer { text-align: center; font-size: 11px; color: #999; margin-top: 60px; border-top: 1px solid #eee; padding-top: 20px; }
+                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #121212; color: #e0e0e0; margin: 40px; }}
+                h1 {{ color: #00d2ff; border-bottom: 2px solid #333; padding-bottom: 10px; }}
+                h2 {{ color: #aaaaaa; }}
+                .metric-container {{ display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 30px; }}
+                .metric-box {{ background-color: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 20px; width: 200px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }}
+                .metric-value {{ font-size: 24px; font-weight: bold; color: #fff; margin-top: 10px; }}
+                .positive {{ color: #4caf50; }}
+                .negative {{ color: #f44336; }}
+                .chart {{ margin-top: 30px; border: 1px solid #333; border-radius: 8px; padding: 10px; background-color: #1e1e1e; }}
             </style>
         </head>
         <body>
-            <div class="container">
-                <div class="header">
-                    <h1>ED CAPITAL QUANT ENGINE</h1>
-                    <div class="subtitle">Piyasalara Genel Bakış - Kantitatif Performans ve Risk Raporu</div>
-                    <div class="subtitle" style="font-size: 14px;">Tarih: {{ date }}</div>
-                </div>
+            <h1>Piyasalara Genel Bakış (ED Capital Quant Engine)</h1>
+            <p>Tarih: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}</p>
 
-                <h2>Temel Performans Metrikleri</h2>
-                <div class="metrics-container">
-                    <div class="metric-card"><h3>Toplam Net PnL</h3><h2>{{ metrics['Total PnL'] }}</h2></div>
-                    <div class="metric-card"><h3>İsabet Oranı (Win Rate)</h3><h2>{{ metrics['Win Rate'] }}</h2></div>
-                    <div class="metric-card"><h3>Kâr Faktörü (Profit Factor)</h3><h2>{{ metrics['Profit Factor'] }}</h2></div>
-                    <div class="metric-card"><h3>Ortalama Kâr</h3><h2>{{ metrics['Avg Win'] }}</h2></div>
-                    <div class="metric-card"><h3>Ortalama Zarar</h3><h2>{{ metrics['Avg Loss'] }}</h2></div>
-                    <div class="metric-card"><h3>Gerçekleşen Max Düşüş</h3><h2>{{ metrics['Max Drawdown'] }}</h2></div>
+            <h2>Performans Metrikleri</h2>
+            <div class="metric-container">
+                <div class="metric-box">
+                    <div>Net PnL</div>
+                    <div class="metric-value {'positive' if metrics.get('Total PnL', 0) > 0 else 'negative'}">
+                        ${metrics.get('Total PnL', 0):.2f}
+                    </div>
                 </div>
+                <div class="metric-box">
+                    <div>İsabet Oranı (Win Rate)</div>
+                    <div class="metric-value">
+                        {metrics.get('Win Rate', 0)*100:.1f}%
+                    </div>
+                </div>
+                <div class="metric-box">
+                    <div>Kâr Faktörü (Profit Factor)</div>
+                    <div class="metric-value">
+                        {metrics.get('Profit Factor', 0):.2f}
+                    </div>
+                </div>
+                <div class="metric-box">
+                    <div>Gerçekleşen Max Düşüş</div>
+                    <div class="metric-value negative">
+                        ${metrics.get('Max Drawdown', 0):.2f}
+                    </div>
+                </div>
+                <div class="metric-box">
+                    <div>İşlem Sayısı</div>
+                    <div class="metric-value">{metrics.get('Total Trades', 0)}</div>
+                </div>
+            </div>
 
-                <h2>Monte Carlo Stres Testi ve İflas Riski (10,000 Simülasyon)</h2>
-                <div class="metrics-container risk-section">
-                    <div class="metric-card"><h3>%95 Güven Aralığı Beklenen Düşüş</h3><h2>{{ metrics.get('95% CI Expected Max Drawdown', 'N/A') }}</h2></div>
-                    <div class="metric-card"><h3>%99 Güven Aralığı Beklenen Düşüş</h3><h2>{{ metrics.get('99% CI Expected Max Drawdown', 'N/A') }}</h2></div>
-                    <div class="metric-card"><h3>İflas Riski (Risk of Ruin)</h3><h2>{{ metrics.get('Risk of Ruin', 'N/A') }}</h2></div>
+            <h2>Stres Testi ve Risk (Monte Carlo 10K Simülasyon)</h2>
+            <div class="metric-container">
+                <div class="metric-box">
+                    <div>%99 Beklenen Max Düşüş</div>
+                    <div class="metric-value negative">
+                        ${mc_risk.get('99% Expected Drawdown', 0):.2f}
+                    </div>
                 </div>
+                <div class="metric-box">
+                    <div>İflas Riski (Risk of Ruin)</div>
+                    <div class="metric-value {'negative' if mc_risk.get('Risk of Ruin', 0) > 1 else 'positive'}">
+                        {mc_risk.get('Risk of Ruin', 0):.2f}%
+                    </div>
+                </div>
+            </div>
 
-                <div class="img-container">
-                    <h2>Kasa Büyüme Eğrisi (Equity Curve)</h2>
-                    <img src="equity_curve.png" alt="Equity Curve">
-                </div>
-
-                <div class="footer">
-                    CONFIDENTIAL AND PROPRIETARY. This document is for authorized ED Capital personnel only.
-                    Distribution or reproduction is strictly prohibited. Generated by ED Capital Quant Engine v2.0.
-                </div>
+            <div class="chart">
+                <h2>Kasa Büyüme Eğrisi</h2>
+                <img src="equity_curve.png" alt="Equity Curve" style="width: 100%; max-width: 800px;">
             </div>
         </body>
         </html>
         """
 
-        template = Template(html_template)
-        html_content = template.render(
-            date=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-            metrics=metrics
-        )
-
-        report_path = os.path.join(cls.REPORTS_DIR, f'report_{datetime.datetime.now().strftime("%Y%m%d")}.html')
-        with open(report_path, 'w', encoding='utf-8') as f:
+        report_path = f"reports/TearSheet_{datetime.datetime.now().strftime('%Y%m%d')}.html"
+        with open(report_path, "w", encoding="utf-8") as f:
             f.write(html_content)
 
-        logger.info(f"Tear Sheet generated with MC Metrics: {report_path}")
-        await async_send_telegram_message(f"📄 <b>Weekly Tear Sheet Generated</b>\nWin Rate: {metrics['Win Rate']}\nPnL: {metrics['Total PnL']}\nRisk of Ruin: {metrics.get('Risk of Ruin', 'N/A')}")
-
+        logger.info(f"Tear Sheet generated: {report_path}")
         return report_path
+
+if __name__ == "__main__":
+    rep = ReportGenerator()
+    rep.generate_html_report()
