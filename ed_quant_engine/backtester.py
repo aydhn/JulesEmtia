@@ -1,181 +1,203 @@
 import pandas as pd
 import numpy as np
 from typing import Dict, Any, List
-from strategy import QuantStrategy
-from execution_model import ExecutionSimulator
-from logger import logger
+from data_loader import fetch_historical_data
+from strategy import generate_signals
+from features import add_features
+from macro_filter import get_macro_regime
+from ml_validator import validate_signal_with_ml
+from sentiment_filter import SentimentAnalyzer, check_sentiment_veto
+from portfolio_manager import calculate_correlation_matrix, check_correlation_veto
+from execution_model import calculate_slippage_and_spread
+from logger import setup_logger
 
-class VectorizedBacktester:
-    """
-    Phase 7: Historical Backtesting Engine
-    Simulates strategy logic on historical data.
-    Fast, iterative/vectorized approach without heavy external frameworks.
-    Includes brutal realism: Spread & Slippage.
-    """
+logger = setup_logger("Backtester")
 
-    @classmethod
-    def run_backtest(cls, ticker: str, daily_df: pd.DataFrame, hourly_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Runs a historical backtest for a single asset.
-        Returns a DataFrame of executed trades.
-        """
-        if hourly_df.empty or daily_df.empty:
-            return pd.DataFrame()
+def run_historical_backtest(ticker: str, start_date: str = "2020-01-01", end_date: str = "2024-01-01", initial_balance: float = 10000.0) -> Dict[str, Any]:
+    """Runs a highly efficient, vectorized/iterative backtest simulating trading strategy across historical data."""
+    logger.info(f"Backtest Başlatılıyor [{ticker}] Dönem: {start_date} -> {end_date}")
 
-        trades = []
-        is_open = False
-        entry_price = 0.0
-        sl_price = 0.0
-        tp_price = 0.0
-        direction = 0
-        entry_time = None
+    # 1. Fetch multi-timeframe data
+    import yfinance as yf
+    try:
+        # Fetching 1D and 1H simultaneously
+        htf_df = yf.download(ticker, start=start_date, end=end_date, interval="1d", progress=False)
+        ltf_df = yf.download(ticker, start=start_date, end=end_date, interval="1h", progress=False)
+    except Exception as e:
+        logger.error(f"Backtest verisi alınamadı: {str(e)}")
+        return {}
 
-        # We need a simulated account size to track PnL roughly
-        account_size = 10000.0
-        risk_pct = 0.02 # Constant risk for simple backtest
+    if htf_df.empty or ltf_df.empty:
+        return {}
 
-        # Iterate through hourly data (simulating time passing)
-        # Start from index 50 to ensure indicators have enough lookback
-        for i in range(50, len(hourly_df)):
-            current_idx = hourly_df.index[i]
-            current_row = hourly_df.iloc[i]
+    # Flatten columns
+    if isinstance(htf_df.columns, pd.MultiIndex):
+        htf_df.columns = [col[0] for col in htf_df.columns]
+    if isinstance(ltf_df.columns, pd.MultiIndex):
+        ltf_df.columns = [col[0] for col in ltf_df.columns]
 
-            # Find the corresponding daily row (last closed daily candle BEFORE current hour)
-            # This prevents lookahead bias in backtesting
-            past_daily = daily_df[daily_df.index < current_idx]
-            if past_daily.empty:
-                continue
+    # Timezone strip
+    htf_df.index = htf_df.index.tz_localize(None)
+    ltf_df.index = ltf_df.index.tz_localize(None)
 
-            current_daily_row = past_daily.iloc[-1]
+    # Calculate indicators
+    htf_df = add_features(htf_df)
+    ltf_df = add_features(ltf_df)
 
-            # 1. Check Open Trades
-            if is_open:
-                current_price = current_row['Close']
-                exit_price = 0.0
-                reason = ""
+    # Shift HTF by 1 to prevent lookahead
+    htf_shifted = htf_df.shift(1).reset_index()
+    ltf_df_reset = ltf_df.reset_index()
 
-                # Check SL/TP
-                if direction == 1: # Long
-                    if current_row['Low'] <= sl_price:
-                        # Slippage applied on SL exit
-                        exit_price = ExecutionSimulator.execute_trade_price(ticker, sl_price, -1, pd.Series([current_row['ATR_14']]))
-                        reason = "SL Hit"
-                    elif current_row['High'] >= tp_price:
-                        exit_price = ExecutionSimulator.execute_trade_price(ticker, tp_price, -1, pd.Series([current_row['ATR_14']]))
-                        reason = "TP Hit"
-                else: # Short
-                    if current_row['High'] >= sl_price:
-                        exit_price = ExecutionSimulator.execute_trade_price(ticker, sl_price, 1, pd.Series([current_row['ATR_14']]))
-                        reason = "SL Hit"
-                    elif current_row['Low'] <= tp_price:
-                        exit_price = ExecutionSimulator.execute_trade_price(ticker, tp_price, 1, pd.Series([current_row['ATR_14']]))
-                        reason = "TP Hit"
+    # Align DataFrames
+    merged_df = pd.merge_asof(
+        ltf_df_reset.sort_values('Datetime'),
+        htf_shifted.sort_values('Date'),
+        left_on='Datetime',
+        right_on='Date',
+        direction='backward',
+        suffixes=('', '_HTF')
+    )
+    merged_df.set_index('Datetime', inplace=True)
 
-                # Close Trade
-                if exit_price > 0:
-                    # Calculate PnL
-                    # Rough position sizing: Risk Amount / SL Distance
-                    risk_amount = account_size * risk_pct
-                    sl_dist = abs(entry_price - sl_price)
-                    pos_size = risk_amount / sl_dist if sl_dist > 0 else 0
+    balance = initial_balance
+    trades = []
+    open_trade = None
 
-                    pnl = (exit_price - entry_price) * pos_size * direction
-                    account_size += pnl # Compounding
+    # Simülasyon Döngüsü (Iterative approach needed for trailing stop path-dependence)
+    for i in range(200, len(merged_df)):
+        current_bar = merged_df.iloc[i]
 
-                    trades.append({
-                        'ticker': ticker,
-                        'direction': 'Long' if direction == 1 else 'Short',
-                        'entry_time': entry_time,
-                        'exit_time': current_idx,
-                        'entry_price': entry_price,
-                        'exit_price': exit_price,
-                        'pnl': pnl,
-                        'reason': reason
-                    })
-                    is_open = False
-                continue # Skip looking for new entries while in a trade (Simple backtest logic)
+        # 1. Check open trade for exit (TP/SL)
+        if open_trade:
+            # Trailing stop and breakeven simulation logic
+            current_price = current_bar['Close']
+            entry_price = open_trade['entry_price']
+            direction = open_trade['direction']
+            sl = open_trade['sl_price']
+            tp = open_trade['tp_price']
+            atr = current_bar['ATRr_14']
 
-            # 2. Look for New Signals
-            # Create a mock slice of data up to this point to feed the strategy
-            # To be efficient, we manually replicate the core Strategy confluence logic here
-            # to avoid async overhead during millions of backtest iterations.
+            pnl = 0.0
+            closed = False
 
-            # Master Veto (Daily)
-            htf_trend = 0
-            if len(past_daily) >= 2:
-                prev_day = past_daily.iloc[-2]
-                if prev_day['Close'] > prev_day['EMA_50'] and prev_day['MACD'] > 0:
-                    htf_trend = 1
-                elif prev_day['Close'] < prev_day['EMA_50'] and prev_day['MACD'] < 0:
-                    htf_trend = -1
+            if direction == "Long":
+                # Breakeven
+                if current_price > entry_price + (1.5 * atr) and sl < entry_price:
+                    open_trade['sl_price'] = entry_price
+                # Trail
+                elif current_price > entry_price + (2.0 * atr):
+                    new_sl = current_price - (1.5 * atr)
+                    if new_sl > sl: open_trade['sl_price'] = new_sl
 
-            if htf_trend == 0:
-                continue
+                if current_bar['Low'] <= sl: # Hit stop loss
+                    # Exit with slippage penalty
+                    exit_price = sl * (1 - 0.0005)
+                    pnl = (exit_price - entry_price) * open_trade['size']
+                    closed = True
+                elif current_bar['High'] >= tp: # Hit take profit
+                    exit_price = tp * (1 - 0.0005)
+                    pnl = (exit_price - entry_price) * open_trade['size']
+                    closed = True
 
-            # LTF Sniper Entry
-            prev_hour = hourly_df.iloc[i-1]
-            prev2_hour = hourly_df.iloc[i-2]
+            elif direction == "Short":
+                # Breakeven
+                if current_price < entry_price - (1.5 * atr) and sl > entry_price:
+                    open_trade['sl_price'] = entry_price
+                # Trail
+                elif current_price < entry_price - (2.0 * atr):
+                    new_sl = current_price + (1.5 * atr)
+                    if new_sl < sl: open_trade['sl_price'] = new_sl
 
-            signal_dir = 0
-            if htf_trend == 1:
-                if prev_hour['RSI_14'] < 30 and prev2_hour['RSI_14'] >= 30:
-                    signal_dir = 1
-                elif prev_hour['Low'] <= prev_hour['BBL_20_2.0']:
-                    signal_dir = 1
-            elif htf_trend == -1:
-                if prev_hour['RSI_14'] > 70 and prev2_hour['RSI_14'] <= 70:
-                    signal_dir = -1
-                elif prev_hour['High'] >= prev_hour['BBU_20_2.0']:
-                    signal_dir = -1
+                if current_bar['High'] >= sl: # Hit stop loss
+                    exit_price = sl * (1 + 0.0005)
+                    pnl = (entry_price - exit_price) * open_trade['size']
+                    closed = True
+                elif current_bar['Low'] <= tp: # Hit take profit
+                    exit_price = tp * (1 + 0.0005)
+                    pnl = (entry_price - exit_price) * open_trade['size']
+                    closed = True
 
-            if signal_dir != 0:
-                # Open Trade
-                raw_entry = current_row['Open']
-                atr = prev_hour['ATR_14']
+            if closed:
+                balance += pnl
+                trades.append({
+                    "entry_time": open_trade['entry_time'],
+                    "exit_time": current_bar.name,
+                    "direction": direction,
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "pnl": pnl,
+                    "balance": balance
+                })
+                open_trade = None
+            continue # If trade is open, we don't look for new entries
 
-                # Apply Execution Costs
-                exec_entry = ExecutionSimulator.execute_trade_price(ticker, raw_entry, signal_dir, pd.Series([atr]))
+        # 2. Look for new entry
+        # We pass a slice of the dataframe ending at the previous candle to the strategy to mimic live conditions
+        window_df = merged_df.iloc[i-200:i+1] # Provide enough lookback, up to current CLOSED candle
 
-                if signal_dir == 1:
-                    raw_sl = exec_entry - (1.5 * atr)
-                    raw_tp = exec_entry + (3.0 * atr)
-                    exec_sl = ExecutionSimulator.execute_trade_price(ticker, raw_sl, -1, pd.Series([atr]))
-                    exec_tp = ExecutionSimulator.execute_trade_price(ticker, raw_tp, -1, pd.Series([atr]))
-                else:
-                    raw_sl = exec_entry + (1.5 * atr)
-                    raw_tp = exec_entry - (3.0 * atr)
-                    exec_sl = ExecutionSimulator.execute_trade_price(ticker, raw_sl, 1, pd.Series([atr]))
-                    exec_tp = ExecutionSimulator.execute_trade_price(ticker, raw_tp, 1, pd.Series([atr]))
+        signal = generate_signals(window_df, ticker)
 
-                is_open = True
-                direction = signal_dir
-                entry_price = exec_entry
-                sl_price = exec_sl
-                tp_price = exec_tp
-                entry_time = current_idx
+        if signal:
+            direction = signal['direction']
 
-        return pd.DataFrame(trades)
+            # MTF Filter check
+            if 'EMA_50_HTF' in current_bar:
+                htf_ema = current_bar['EMA_50_HTF']
+                htf_close = current_bar['Close_HTF']
+                if (direction == "Long" and htf_close < htf_ema) or \
+                   (direction == "Short" and htf_close > htf_ema):
+                    continue
 
-    @classmethod
-    def analyze_results(cls, trades_df: pd.DataFrame) -> dict:
-        """Calculates Quant metrics for a backtest run."""
-        if trades_df.empty:
-            return {"Win Rate": 0, "Profit Factor": 0, "Total PnL": 0, "Trades": 0}
+            # Calculate Entry Price with Spread & Slippage Phase 21
+            cost_pct = 0.0005 + 0.0005 # 0.05% spread half + 0.05% slip
+            entry_price = signal['entry_price'] * (1 + cost_pct) if direction == "Long" else signal['entry_price'] * (1 - cost_pct)
 
-        wins = trades_df[trades_df['pnl'] > 0]
-        losses = trades_df[trades_df['pnl'] <= 0]
+            # Simplified Position Sizing (Fixed 2% Risk)
+            risk_amount = balance * 0.02
+            stop_distance = abs(entry_price - signal['sl_price'])
+            if stop_distance == 0: continue
 
-        win_rate = len(wins) / len(trades_df)
+            lot_size = risk_amount / stop_distance
 
-        gross_profit = wins['pnl'].sum()
-        gross_loss = abs(losses['pnl'].sum())
-        profit_factor = gross_profit / gross_loss if gross_loss != 0 else float('inf')
+            open_trade = {
+                "entry_time": current_bar.name,
+                "direction": direction,
+                "entry_price": entry_price,
+                "sl_price": signal['sl_price'],
+                "tp_price": signal['tp_price'],
+                "size": lot_size
+            }
 
-        total_pnl = trades_df['pnl'].sum()
+    # Generate Performance Metrics
+    df_trades = pd.DataFrame(trades)
+    if df_trades.empty:
+        logger.warning(f"Backtest Sonucu [{ticker}]: İşlem bulunamadı.")
+        return {}
 
-        return {
-            "Win Rate": win_rate,
-            "Profit Factor": profit_factor,
-            "Total PnL": total_pnl,
-            "Trades": len(trades_df)
-        }
+    total_trades = len(df_trades)
+    winning_trades = df_trades[df_trades['pnl'] > 0]
+    losing_trades = df_trades[df_trades['pnl'] <= 0]
+
+    win_rate = (len(winning_trades) / total_trades) * 100
+    gross_profit = winning_trades['pnl'].sum()
+    gross_loss = abs(losing_trades['pnl'].sum())
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float('inf')
+    net_pnl = df_trades['pnl'].sum()
+
+    # Calculate Max Drawdown
+    df_trades['equity'] = initial_balance + df_trades['pnl'].cumsum()
+    df_trades['peak'] = df_trades['equity'].cummax()
+    df_trades['drawdown'] = (df_trades['equity'] - df_trades['peak']) / df_trades['peak'] * 100
+    max_drawdown = df_trades['drawdown'].min()
+
+    logger.info(f"Backtest Özeti [{ticker}]: İşlem Sayısı: {total_trades} | Net PnL: ${net_pnl:.2f} | Win Rate: %{win_rate:.2f} | PF: {profit_factor:.2f} | Max DD: %{max_drawdown:.2f}")
+
+    return {
+        "ticker": ticker,
+        "total_trades": total_trades,
+        "net_pnl": net_pnl,
+        "win_rate": win_rate,
+        "profit_factor": profit_factor,
+        "max_drawdown": max_drawdown,
+        "equity_curve": df_trades[['exit_time', 'equity']].to_dict('records')
+    }

@@ -1,110 +1,78 @@
 import feedparser
 import nltk
 from nltk.sentiment import SentimentIntensityAnalyzer
-import asyncio
-from logger import logger
+import pandas as pd
+from logger import setup_logger
 
-# Initialize NLTK VADER once
+logger = setup_logger("SentimentFilter")
+
+# Ensure NLTK lexicons are downloaded silently
 try:
     nltk.data.find('sentiment/vader_lexicon.zip')
 except LookupError:
     nltk.download('vader_lexicon', quiet=True)
 
-sia = SentimentIntensityAnalyzer()
+class SentimentAnalyzer:
+    """Uses NLTK VADER to analyze financial news RSS feeds for market sentiment."""
 
-class SentimentFilter:
-    """
-    Zero-budget NLP Sentiment Analysis Engine (Phase 20).
-    Reads RSS feeds to gauge market sentiment and filter false technical signals.
-    """
+    def __init__(self):
+        self.sia = SentimentIntensityAnalyzer()
+        # RSS Feeds (Free sources)
+        self.feeds = [
+            "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664", # Finance
+            "https://feeds.a.dj.com/rss/RSSMarketsMain.xml" # WSJ Markets
+        ]
 
-    # Trusted Free RSS Feeds
-    RSS_FEEDS = {
-        "Investing_Commodities": "https://www.investing.com/rss/news_11.rss",
-        "Investing_Forex": "https://www.investing.com/rss/news_1.rss",
-        "Yahoo_Finance_Top": "https://finance.yahoo.com/news/rssindex"
-    }
-
-    # Asset to Keyword Mapping for targeted sentiment
-    ASSET_KEYWORDS = {
-        "Gold": ["gold", "bullion", "xau", "precious metal"],
-        "Silver": ["silver", "xag"],
-        "Oil": ["oil", "crude", "wti", "brent", "opec"],
-        "USD": ["dollar", "fed", "powell", "inflation", "cpi", "dxy"],
-        "TRY": ["lira", "tcmb", "cbrt", "turkey"]
-    }
-
-    @classmethod
-    async def fetch_and_analyze(cls, ticker_name: str) -> float:
-        """
-        Asynchronously fetches news and calculates average VADER compound score (-1.0 to 1.0)
-        for a specific asset based on keywords.
-        """
-        logger.info(f"Running NLP Sentiment Analysis for {ticker_name}...")
-
-        # Determine relevant keywords for the ticker
-        keywords = []
-        for key, words in cls.ASSET_KEYWORDS.items():
-            if key.lower() in ticker_name.lower():
-                keywords.extend(words)
-
-        # If no specific keywords match, use general macro keywords
-        if not keywords:
-            keywords = ["economy", "inflation", "recession", "markets"]
-
-        total_score = 0.0
-        relevant_articles = 0
-
+    def fetch_and_analyze(self, keywords: list) -> float:
+        """Fetches RSS headlines, filters by keywords, and calculates average sentiment score."""
+        scores = []
         try:
-            # Parse feeds asynchronously to prevent blocking
-            for feed_url in cls.RSS_FEEDS.values():
-                feed = await asyncio.to_thread(feedparser.parse, feed_url)
-
+            for feed_url in self.feeds:
+                feed = feedparser.parse(feed_url)
                 for entry in feed.entries:
-                    title = entry.title.lower()
-                    summary = entry.get('summary', '').lower()
+                    title = entry.title
+                    # Check if relevant keywords exist in title
+                    if any(kw.lower() in title.lower() for kw in keywords):
+                        # Calculate VADER compound score (-1.0 to 1.0)
+                        score = self.sia.polarity_scores(title)['compound']
+                        scores.append(score)
 
-                    # Check if any keyword is in title or summary
-                    if any(kw in title or kw in summary for kw in keywords):
-                        # Calculate VADER sentiment
-                        score = sia.polarity_scores(entry.title)['compound']
-                        total_score += score
-                        relevant_articles += 1
+            if not scores:
+                return 0.0 # Neutral if no news found
 
-            # Return average sentiment score
-            if relevant_articles > 0:
-                avg_score = total_score / relevant_articles
-                logger.info(f"Sentiment for {ticker_name}: {avg_score:.2f} (Based on {relevant_articles} articles)")
-                return avg_score
-            else:
-                logger.debug(f"No relevant news found for {ticker_name}.")
-                return 0.0
+            avg_score = sum(scores) / len(scores)
+            logger.info(f"Haber Duyarlılık Skoru (Sentiment): {avg_score:.2f} (Örneklem: {len(scores)})")
+            return avg_score
 
         except Exception as e:
-            logger.error(f"Error fetching RSS feeds for NLP: {e}")
+            logger.error(f"Duyarlılık analizi hatası: {str(e)}")
             return 0.0
 
-    @classmethod
-    async def check_sentiment_veto(cls, ticker_name: str, signal_direction: int, threshold: float = 0.50) -> bool:
-        """
-        Checks if the fundamental sentiment contradicts the technical signal.
-        Returns True if signal should be VETOED.
-        signal_direction: 1 (Long) or -1 (Short)
-        """
-        sentiment_score = await cls.fetch_and_analyze(ticker_name)
+def check_sentiment_veto(ticker: str, direction: str, analyzer: SentimentAnalyzer) -> bool:
+    """Blocks a signal if the overall market sentiment is strongly against the technical direction."""
+    # Map ticker to search keywords
+    keywords_map = {
+        "GC=F": ["gold", "precious metals", "inflation", "fed"],
+        "CL=F": ["oil", "energy", "opec", "crude"],
+        "USDTRY=X": ["lira", "turkey", "inflation", "central bank"]
+    }
 
-        # If signal is LONG (1) but sentiment is intensely NEGATIVE (<-0.50) -> VETO
-        if signal_direction == 1 and sentiment_score < -threshold:
-            logger.warning(f"SENTIMENT VETO: Technical Long for {ticker_name} rejected due to negative news ({sentiment_score:.2f}).")
-            return True
+    # Default to general macro terms if ticker specific not found
+    keywords = keywords_map.get(ticker, ["markets", "economy", "fed", "inflation"])
 
-        # If signal is SHORT (-1) but sentiment is intensely POSITIVE (>0.50) -> VETO
-        if signal_direction == -1 and sentiment_score > threshold:
-            logger.warning(f"SENTIMENT VETO: Technical Short for {ticker_name} rejected due to positive news ({sentiment_score:.2f}).")
-            return True
+    score = analyzer.fetch_and_analyze(keywords)
 
-        # Confluence / High Conviction
-        if (signal_direction == 1 and sentiment_score > threshold) or (signal_direction == -1 and sentiment_score < -threshold):
-            logger.info(f"HIGH CONVICTION: Technical and Fundamental confluence for {ticker_name} (Sentiment: {sentiment_score:.2f}).")
+    # Thresholds
+    NEGATIVE_THRESHOLD = -0.5
+    POSITIVE_THRESHOLD = 0.5
 
-        return False
+    # Veto logic
+    if direction == "Long" and score < NEGATIVE_THRESHOLD:
+        logger.warning(f"Sentiment Vetosu: {ticker} (Long) reddedildi. Şiddetli Negatif Duyarlılık ({score:.2f})")
+        return True # VETO
+
+    if direction == "Short" and score > POSITIVE_THRESHOLD:
+        logger.warning(f"Sentiment Vetosu: {ticker} (Short) reddedildi. Şiddetli Pozitif Duyarlılık ({score:.2f})")
+        return True # VETO
+
+    return False # Pass

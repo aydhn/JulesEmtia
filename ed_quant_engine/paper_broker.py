@@ -1,56 +1,84 @@
-import sqlite3
-import config
+import os
+from typing import Dict, Any, List
 from base_broker import BaseBroker
-from logger import logger
-from datetime import datetime
-from paper_db import paper_db
+from paper_db import get_open_positions, open_trade, close_trade, update_sl_price
+from logger import setup_logger
+
+logger = setup_logger("PaperBroker")
 
 class PaperBroker(BaseBroker):
-    def __init__(self, db_path=config.DB_PATH):
-        self.db_path = db_path
+    """Concrete implementation of BaseBroker using local SQLite for simulated (paper) trading."""
 
-    async def get_account_balance(self):
-        # Calculate from initial 10k + total realized PNL
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT SUM(pnl) FROM trades WHERE status = 'Closed'")
-            result = cur.fetchone()[0]
-            total_pnl = result if result else 0.0
+    def __init__(self):
+        self.initial_balance = float(os.getenv("INITIAL_BALANCE", "10000.0"))
+        # Balance tracking could be more complex, but for paper trading we sum closed PnLs
+        self._balance = self.initial_balance
+        logger.info(f"Sanal Broker (PaperBroker) Başlatıldı. Bakiye: {self._balance}")
 
-        return 10000.0 + total_pnl
+    def get_account_balance(self) -> float:
+        # In a real broker, this is an API call. Here we calculate from db.
+        import sqlite3
+        conn = sqlite3.connect(os.getenv("DB_NAME", "paper_db.sqlite3"))
+        cursor = conn.cursor()
+        cursor.execute("SELECT sum(pnl) FROM trades WHERE status = 'Closed'")
+        total_pnl = cursor.fetchone()[0] or 0.0
+        conn.close()
+        return self.initial_balance + total_pnl
 
-    async def place_order(self, ticker, direction, size, entry_price, sl, tp):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute('''INSERT INTO trades
-                (ticker, direction, entry_time, entry_price, sl_price, tp_price, position_size, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'Open')''',
-                (ticker, direction, datetime.now().isoformat(), entry_price, sl, tp, size))
-        logger.info(f"Order Placed [PAPER]: {direction} {ticker} at {entry_price:.4f}")
+    def get_open_positions(self) -> List[Dict[str, Any]]:
+        return get_open_positions()
 
-    async def modify_trailing_stop(self, trade_id, new_sl):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("UPDATE trades SET sl_price = ? WHERE trade_id = ?", (new_sl, trade_id))
+    def place_market_order(self, ticker: str, direction: str, size: float, sl: float, tp: float, current_price: float) -> Dict[str, Any]:
+        """Simulates placing an order, incorporating estimated slippage and spread (Phase 21)."""
 
-    async def get_open_positions(self):
-        return paper_db.get_open_trades()
+        # Dynamic Spread & Slippage simulation based on asset class
+        base_spreads = {
+            "GC=F": 0.0002, # 0.02%
+            "CL=F": 0.0005, # 0.05%
+            "USDTRY=X": 0.0010 # 0.10%
+        }
 
-    async def close_position(self, trade_id, exit_price):
-        # We need the original trade details to calculate PNL correctly
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            trade = conn.execute("SELECT * FROM trades WHERE trade_id = ?", (trade_id,)).fetchone()
+        # Get base spread or default 0.05%
+        spread_pct = base_spreads.get(ticker, 0.0005)
 
-        if trade:
-            entry_price = trade['entry_price']
-            direction = trade['direction']
-            size = trade['position_size']
+        # Simulated Slippage (e.g., 0.05%)
+        slippage_pct = 0.0005
 
-            # Simple PNL (no dynamic exit cost here, should be applied before calling)
-            if direction == 'Long':
-                pnl = (exit_price - entry_price) * size
-            else:
-                pnl = (entry_price - exit_price) * size
+        total_cost_pct = (spread_pct / 2) + slippage_pct
 
-            paper_db.close_trade(trade_id, exit_price, pnl)
-            return pnl
-        return 0.0
+        if direction == "Long":
+            entry_price = current_price * (1 + total_cost_pct)
+        else:
+            entry_price = current_price * (1 - total_cost_pct)
+
+        from datetime import datetime
+        trade_id = open_trade(
+            ticker=ticker,
+            direction=direction,
+            entry_time=str(datetime.now()),
+            entry_price=entry_price,
+            sl=sl,
+            tp=tp,
+            size=size
+        )
+
+        receipt = {
+            "trade_id": str(trade_id),
+            "ticker": ticker,
+            "direction": direction,
+            "executed_price": entry_price,
+            "size": size,
+            "slippage_cost": current_price * slippage_pct * size,
+            "status": "FILLED"
+        }
+        logger.info(f"Sanal Emir İletildi (Denetim İzi): {receipt}")
+        return receipt
+
+    def modify_trailing_stop(self, trade_id: str, new_sl: float) -> bool:
+        update_sl_price(int(trade_id), new_sl)
+        return True
+
+    def close_position(self, trade_id: str, exit_price: float, pnl: float, pnl_percent: float) -> Dict[str, Any]:
+        from datetime import datetime
+        close_trade(int(trade_id), str(datetime.now()), exit_price, pnl, pnl_percent)
+        return {"status": "CLOSED", "exit_price": exit_price, "pnl": pnl}
