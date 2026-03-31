@@ -1,48 +1,28 @@
 import logging
 import os
 from logging.handlers import RotatingFileHandler
-import sys
+from src.config import LOGS_PATH
 
-# Konfigürasyonu buradan alıyoruz (dosya yolları vs)
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from src.config import LOG_DIR
+def setup_logger(name, log_file, level=logging.INFO):
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# Log dizinini oluştur
-os.makedirs(LOG_DIR, exist_ok=True)
-LOG_FILE = os.path.join(LOG_DIR, "ed_quant_engine.log")
-
-# Logger Yapılandırması
-logger = logging.getLogger("EDQuantEngine")
-logger.setLevel(logging.INFO)
-
-# Eğer handler zaten varsa tekrar ekleme
-if not logger.handlers:
-    # Format
-    formatter = logging.Formatter(
-        "[%(asctime)s] [%(levelname)s] [%(module)s]: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
+    file_handler = RotatingFileHandler(
+        os.path.join(LOGS_PATH, log_file),
+        maxBytes=5*1024*1024,
+        backupCount=3
     )
+    file_handler.setFormatter(formatter)
 
-    # Console Handler
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
 
-    # File Handler (Rotating, Max 5MB, 3 Yedek)
-    fh = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=3)
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
 
-def log_info(msg: str):
-    logger.info(msg)
+    if not logger.handlers:
+        logger.addHandler(file_handler)
+        logger.addHandler(stream_handler)
 
-def log_error(msg: str):
-    logger.error(msg)
+    return logger
 
-def log_warning(msg: str):
-    logger.warning(msg)
-
-def log_critical(msg: str):
-    logger.critical(msg)
+logger = setup_logger("quant_engine", "quant_engine.log")

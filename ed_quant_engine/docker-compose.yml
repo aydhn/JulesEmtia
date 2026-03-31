@@ -5,14 +5,14 @@ services:
     build: .
     container_name: ed_quant_engine
     restart: always
-    environment:
-      - TZ=Europe/Istanbul # Synchronization of market time
     env_file:
       - .env
     volumes:
-      - ./data:/app/data        # Critical: Persistent Local DB & ML Models
-      - ./logs:/app/logs        # Critical: Persistent Logs for auditing
-      - ./reports:/app/reports  # Persistent Tear Sheets
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./models:/app/models
+    environment:
+      - TZ=Europe/Istanbul
     logging:
       driver: "json-file"
       options:

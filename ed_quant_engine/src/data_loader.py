@@ -1,70 +1,45 @@
 import yfinance as yf
 import pandas as pd
-import numpy as np
-import time
 import asyncio
-from typing import Dict, List, Optional
-from .logger import log_info, log_error, log_warning
+from typing import Dict, Optional
+from src.logger import logger
 
-def fetch_data_sync(ticker: str, period: str = "60d", interval: str = "1h", retries: int = 3) -> Optional[pd.DataFrame]:
-    """
-    yfinance üzerinden veri çeken Exponential Backoff korumalı senkron metod.
-    """
-    for attempt in range(retries):
-        try:
-            df = yf.download(ticker, period=period, interval=interval, progress=False)
-            if df.empty:
-                log_warning(f"[{ticker}] Veri boş döndü. (Deneme {attempt+1}/{retries})")
-                time.sleep(2 ** attempt)
-                continue
+class DataLoader:
+    def __init__(self, tickers: list):
+        self.tickers = tickers
 
-            # Eğer columns MultiIndex ise (yfinance 0.2.37 bazen yapabiliyor), Flatten
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.droplevel(1)
+    async def fetch_historical_data(self, ticker: str, interval: str = "1h", period: str = "1y", retries: int = 3) -> Optional[pd.DataFrame]:
+        for attempt in range(retries):
+            try:
+                # Use asyncio.to_thread for blocking calls
+                df = await asyncio.to_thread(yf.download, tickers=ticker, interval=interval, period=period, progress=False)
 
-            # Nan yönetimi (Forward fill) ve indeks temizliği
-            df.ffill(inplace=True)
-            df.dropna(inplace=True) # İlk satırlardaki temizlenemeyen nan'lar için
-            df.index = df.index.tz_localize(None) # Zaman dilimi tutarsızlığını önlemek için tz strip
-            return df
-        except Exception as e:
-            log_error(f"[{ticker}] API Hatası: {e} (Deneme {attempt+1}/{retries})")
-            time.sleep(2 ** attempt)
+                if df.empty:
+                    logger.warning(f"No data returned for {ticker}. Attempt {attempt+1}/{retries}")
+                    await asyncio.sleep(2 ** attempt)
+                    continue
 
-    log_error(f"[{ticker}] Veri çekilemedi. Max retry sayısına ulaşıldı.")
-    return None
+                # Forward fill NaNs for missing days/holidays
+                df = df.ffill().bfill()
+                df.index = pd.to_datetime(df.index).tz_localize(None) # Strip timezone for merging
 
-async def fetch_data_async(ticker: str, period: str = "60d", interval: str = "1h", retries: int = 3) -> Optional[pd.DataFrame]:
-    """
-    Senkron metodu asyncio evreninde bloklamadan çalıştıran Async Wrapper.
-    """
-    return await asyncio.to_thread(fetch_data_sync, ticker, period, interval, retries)
+                return df
 
-async def load_universe_mtf(tickers: List[str]) -> Dict[str, Dict[str, pd.DataFrame]]:
-    """
-    Tüm evrenin Günlük (HTF) ve Saatlik (LTF) verilerini asenkron olarak çeker.
-    Dönüş formatı: {"GC=F": {"1d": df_daily, "1h": df_hourly}}
-    """
-    log_info(f"{len(tickers)} adet varlık için MTF (1D ve 1H) veri çekimi başlatılıyor...")
-    universe_data = {}
+            except Exception as e:
+                logger.error(f"Error fetching data for {ticker}: {e}. Attempt {attempt+1}/{retries}")
+                await asyncio.sleep(2 ** attempt)
 
-    # İki ayrı görev listesi
-    tasks_1d = [fetch_data_async(t, period="2y", interval="1d") for t in tickers]
-    tasks_1h = [fetch_data_async(t, period="60d", interval="1h") for t in tickers]
+        return None
 
-    # Asenkron bekleme
-    results_1d = await asyncio.gather(*tasks_1d)
-    results_1h = await asyncio.gather(*tasks_1h)
+    async def get_all_data(self, interval: str = "1h", period: str = "1y") -> Dict[str, pd.DataFrame]:
+        tasks = [self.fetch_historical_data(t, interval, period) for t in self.tickers]
+        results = await asyncio.gather(*tasks)
+        return {ticker: df for ticker, df in zip(self.tickers, results) if df is not None}
 
-    # Sözlüğe doldurma
-    for i, ticker in enumerate(tickers):
-        if results_1d[i] is not None and results_1h[i] is not None:
-            universe_data[ticker] = {
-                "1d": results_1d[i],
-                "1h": results_1h[i]
-            }
-        else:
-            log_warning(f"[{ticker}] MTF verileri eksik olduğu için işleme alınmayacak.")
-
-    log_info(f"{len(universe_data)} varlığın MTF verisi başarıyla çekildi.")
-    return universe_data
+if __name__ == "__main__":
+    async def test():
+        dl = DataLoader(["GC=F", "USDTRY=X"])
+        data = await dl.get_all_data(interval="1d", period="1mo")
+        for t, df in data.items():
+            print(f"{t}:\n{df.tail()}")
+    asyncio.run(test())

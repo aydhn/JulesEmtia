@@ -1,34 +1,49 @@
-# ED Capital Quant Engine 🚀
+# ED Capital Quant Engine
 
-A low-frequency, high-win-rate, zero-budget quantitative trading bot built purely in Python.
+A high-win-rate, low-frequency, and robust algorithmic trading engine designed with strict risk management parameters and complete multi-timeframe confirmation. Inspired by institutional practices and run entirely on open-source, zero-budget infrastructure.
 
-Designed for autonomous operations on Commodities and Forex (TRY-based) markets, strictly adhering to **JP Morgan Risk standards** and **Bill Benter statistical modeling**.
+## Key Features
 
-## Features
-* **Zero Budget Ecosystem:** Built strictly using free APIs (`yfinance`), open-source libraries (`scikit-learn`, `pandas-ta`), and local execution (No AWS bills or Web scraping).
-* **Multi-Timeframe Analysis (MTF):** Uses Daily (1D) data for master trend confirmation and Hourly (1H) data for sniper entries.
-* **Risk of Ruin Prevention:** Implements dynamic ATR trailing stops, fractional Kelly Criterion position sizing, Pearson correlation limits, and VIX Circuit Breakers.
-* **Machine Learning Validation:** Employs a local `RandomForestClassifier` trained on historical anomalies to veto low-probability technical signals.
-* **NLP Sentiment Filters:** Parses free RSS feeds using NLTK VADER to confirm technical signals against current macro-economic news.
-* **Realistic Execution Modeling:** Penalizes simulated results heavily with dynamic Bid/Ask spreads and Volatility-adjusted slippage.
-* **Two-Way Telegram Command Center:** Complete remote control (Status, Pause, Resume, Panic Close, Force Scan) through Telegram bots asynchronously.
-* **Institutional Reporting:** Generates ED Capital standard "Tear Sheets" with automated Monte Carlo stress-testing metrics.
+- **Multi-Timeframe Confluence (MTF):** Strict alignment between Daily (Macro) and Hourly (Micro) trends, fully protecting against lookahead bias.
+- **Dynamic Risk Management:** Fractional Kelly sizing with ATR-adjusted stop losses and aggressive trailing stops.
+- **Circuit Breakers & Macro Filters:** Integrates VIX anomaly checks, DXY & Yield trend vetoes, and sudden Z-Score flash-crash pauses.
+- **Machine Learning Validator:** A local `RandomForestClassifier` prevents low-probability technical setups from executing.
+- **NLP Sentiment Filter:** Integrates RSS-based `nltk.vader` logic to check news sentiment against the technical direction.
+- **Execution Modeling:** Factoring realistic spread and dynamic ATR-driven slippage costs directly into the PnL.
+- **Two-Way Telegram Interface:** Fully controllable from Telegram via secure chat ID whitelisting (`/durum`, `/durdur`, `/kapat_hepsi`).
+- **Institutional Reporting:** Weekly PDF/Image Tear Sheets summarizing Win Rate, Drawdown, Profit Factor, and Risk of Ruin via Monte Carlo Simulation.
 
-## Setup & Deployment
+## Architecture & DevOps
 
-1. **Configuration:**
-   Rename `.env.example` to `.env` and fill in your Telegram Bot Token and Admin Chat ID.
-   ```bash
-   cp .env.example .env
-   ```
-2. **Docker Deployment:**
-   Deploy securely using the provided Docker-Compose architecture. The `paper_db.sqlite3` and `rf_model.pkl` are mounted as persistent volumes to protect your transaction history and machine learning models from container reboots.
-   ```bash
-   chmod +x manage_bot.sh
-   ./manage_bot.sh start
-   ```
+- **Broker Abstraction Layer:** SQLite base class (`PaperBroker`) ready to be hot-swapped for Live API Execution (Binance, IBKR).
+- **Dockerized & Persistent:** Managed effortlessly through `docker-compose` guaranteeing SQLite history, logs, and trained `.pkl` models survive restarts.
 
-3. **Log Monitoring:**
-   ```bash
-   ./manage_bot.sh logs
-   ```
+## Setup Instructions
+
+### 1. Requirements
+
+Ensure `docker` and `docker-compose` are installed.
+
+### 2. Configuration
+
+```bash
+git clone <repo>
+cd ed_quant_engine
+cp .env.example .env
+```
+Edit the `.env` file to insert your specific `TELEGRAM_BOT_TOKEN` and `ADMIN_CHAT_ID`.
+
+### 3. Deploy
+
+```bash
+./scripts/manage_bot.sh deploy
+```
+
+Watch logs:
+```bash
+./scripts/manage_bot.sh logs
+```
+
+## Disclaimer
+This project simulates institutional strategies for educational and paper trading purposes.
+

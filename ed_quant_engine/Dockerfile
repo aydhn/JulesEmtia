@@ -1,32 +1,26 @@
-# Phase 25: Docker Containerization
-# Uses a slim python image to minimize vulnerabilities and footprint
 FROM python:3.10-slim
 
-# Prevent Python from writing pyc files and buffer
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV TZ=Europe/Istanbul
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    TZ=Europe/Istanbul
 
-# Install dependencies (build-essential for C extensions if needed by pandas/numpy)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     tzdata \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
-# Set up working directory
 WORKDIR /app
 
-# Copy requirements
 COPY requirements.txt .
-
-# Install Python packages
 RUN pip install --no-cache-dir -r requirements.txt
+# Ensure NLTK data is downloaded
+RUN python -m nltk.downloader vader_lexicon
 
-# Copy the rest of the application
 COPY . .
 
-# Ensure manage script is executable
-RUN chmod +x manage_bot.sh
+RUN adduser --disabled-password --gecos "" quantuser && \
+    chown -R quantuser:quantuser /app
+USER quantuser
 
-# Run the application
-CMD ["python", "main.py"]
+CMD ["python", "-m", "src.main_live"]
