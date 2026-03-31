@@ -1,80 +1,63 @@
-import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple
-from logger import log
-import paper_db
+import numpy as np
+from paper_db import PaperDB
+from logger import logger
 
-def run_monte_carlo(simulations: int = 10000, max_trades: int = 500) -> Dict:
+class MonteCarloRisk:
     """
-    Monte Carlo Risk Validation Engine (Phase 22).
-    Simulates thousands of alternative trade sequences by sampling historical PnLs with replacement.
-    Calculates expected Max Drawdown and Risk of Ruin at 95% and 99% Confidence Intervals.
+    Phase 22: Monte Carlo Risk Validation & Risk of Ruin.
+    Stress-tests the strategy using historical trades to simulate future worst-case scenarios.
+    Vectorized NumPy operations for ultra-fast performance.
     """
-    try:
-        query = "SELECT pnl FROM trades WHERE status = 'Closed'"
-        trades_pnl = paper_db.fetch_dataframe(query)
 
-        if trades_pnl.empty or len(trades_pnl) < 10:
-            log.warning("Not enough closed trades for Monte Carlo Simulation.")
-            return {
-                "max_dd_95": 0.0,
-                "max_dd_99": 0.0,
-                "risk_of_ruin": 0.0,
-                "median_profit": 0.0
-            }
+    @classmethod
+    def run_simulation(cls, n_simulations: int = 10000, max_drawdown_limit: float = 0.50) -> dict:
+        """
+        Runs Monte Carlo simulations on historical trade PnLs.
+        Returns critical risk metrics: Expected Max Drawdown (99% CI) and Risk of Ruin.
+        """
+        rows = PaperDB.fetch_all("SELECT net_pnl FROM trades WHERE status = 'Closed' ORDER BY exit_time ASC")
 
-        pnls = trades_pnl['pnl'].values
-        initial_capital = 10000.0 # From .env conceptually, but we simulate % growth
+        if len(rows) < 30:
+            logger.warning("Not enough closed trades (min 30) for reliable Monte Carlo simulation.")
+            return {"99% CI Expected Max Drawdown": "N/A", "Risk of Ruin": "N/A"}
 
-        # Convert PnLs to % returns for realistic simulation scaling
-        returns = pnls / initial_capital
+        pnls = np.array([row['net_pnl'] for row in rows])
+        n_trades = len(pnls)
 
-        simulated_equity_curves = np.zeros((simulations, max_trades))
-        max_drawdowns = np.zeros(simulations)
-        ruin_count = 0
-        ruin_threshold = 0.5 # 50% loss = Ruin
+        logger.info(f"Running {n_simulations} Monte Carlo simulations on {n_trades} trades...")
 
-        for i in range(simulations):
-            # Sample with replacement
-            simulated_returns = np.random.choice(returns, size=max_trades, replace=True)
+        # 1. Vectorized Monte Carlo Simulation (Bootstrap sampling with replacement)
+        # Create a matrix of shape (n_simulations, n_trades)
+        simulated_returns_matrix = np.random.choice(pnls, size=(n_simulations, n_trades), replace=True)
 
-            # Calculate cumulative equity curve (Starting at 1.0)
-            equity_curve = np.cumprod(1 + simulated_returns)
-            simulated_equity_curves[i] = equity_curve
+        # 2. Calculate Equity Curves
+        start_bal = 10000.0 # Default assumption
+        cumulative_pnl = np.cumsum(simulated_returns_matrix, axis=1)
+        equity_curves = start_bal + cumulative_pnl
 
-            # Calculate Max Drawdown for this path
-            peak = np.maximum.accumulate(equity_curve)
-            drawdown = (peak - equity_curve) / peak
-            max_dd = np.max(drawdown)
-            max_drawdowns[i] = max_dd
+        # 3. Calculate Drawdowns for each simulation
+        peak_equity = np.maximum.accumulate(equity_curves, axis=1)
+        drawdowns = (equity_curves - peak_equity) / peak_equity
+        max_drawdowns_per_sim = np.min(drawdowns, axis=1) * 100 # Convert to percentage
 
-            # Check Risk of Ruin
-            if np.min(equity_curve) <= (1.0 - ruin_threshold):
-                ruin_count += 1
+        # 4. Critical Risk Metrics
+        expected_mdd_95 = np.percentile(max_drawdowns_per_sim, 5) # 5th percentile (most negative)
+        expected_mdd_99 = np.percentile(max_drawdowns_per_sim, 1) # 1st percentile
 
-        # Aggregate Metrics
-        max_dd_95 = np.percentile(max_drawdowns, 95) # Expected Max DD in worst 5% of cases
-        max_dd_99 = np.percentile(max_drawdowns, 99) # Expected Max DD in worst 1% of cases
-        risk_of_ruin = (ruin_count / simulations) * 100.0
-        median_profit = (np.median(simulated_equity_curves[:, -1]) - 1.0) * 100.0
+        # Risk of Ruin: Percentage of simulations where Max Drawdown exceeded the limit (e.g. 50%)
+        ruin_limit_pct = -abs(max_drawdown_limit) * 100
+        ruined_sims = np.sum(max_drawdowns_per_sim <= ruin_limit_pct)
+        risk_of_ruin = (ruined_sims / n_simulations) * 100
+
+        logger.info(f"Monte Carlo Risk Analysis Complete. Risk of Ruin: {risk_of_ruin:.2f}%, 99% Expected Max DD: {expected_mdd_99:.2f}%")
 
         if risk_of_ruin > 1.0:
-            log.warning(f"🚨 MONTE CARLO ALERT: Risk of Ruin is dangerously high ({risk_of_ruin:.2f}%). Fractional Kelly too aggressive.")
-
-        log.info(f"Monte Carlo Completed: 99% Max DD = {max_dd_99*100:.2f}%, Risk of Ruin = {risk_of_ruin:.2f}%")
+            logger.critical(f"WARNING: Risk of Ruin is {risk_of_ruin:.2f}% (> 1.0%). Strategy sizing is too aggressive! Reduce Kelly Fraction.")
 
         return {
-            "max_dd_95": max_dd_95 * 100,
-            "max_dd_99": max_dd_99 * 100,
-            "risk_of_ruin": risk_of_ruin,
-            "median_profit": median_profit
+            "95% CI Expected Max Drawdown": f"{expected_mdd_95:.2f}%",
+            "99% CI Expected Max Drawdown": f"{expected_mdd_99:.2f}%",
+            "Risk of Ruin": f"{risk_of_ruin:.2f}%"
         }
 
-    except Exception as e:
-        log.error(f"Monte Carlo simulation failed: {e}")
-        return {
-            "max_dd_95": 0.0,
-            "max_dd_99": 0.0,
-            "risk_of_ruin": 0.0,
-            "median_profit": 0.0
-        }

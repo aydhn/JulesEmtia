@@ -1,117 +1,99 @@
 import yfinance as yf
 import pandas as pd
-import numpy as np
-from typing import Optional
+import asyncio
+from logger import logger
 
-from logger import log
-
-def fetch_macro_data() -> pd.DataFrame:
+class MacroRegimeFilter:
     """
-    Fetches daily macroeconomic indicators (DXY & US10Y).
-    These act as a global regime filter (Risk-On / Risk-Off).
+    Market Regime Filter using macroeconomic indicators.
+    Filters false positive technical signals during Risk-Off (Tightening) regimes.
     """
-    try:
-        # DX-Y.NYB = US Dollar Index, ^TNX = US 10-Year Treasury Yield
-        tickers = ["DX-Y.NYB", "^TNX"]
-        df = yf.download(tickers, period="1y", interval="1d", progress=False)["Close"]
 
-        # Clean up column names in case of MultiIndex
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
+    TICKERS = {
+        "DXY": "DX-Y.NYB",    # US Dollar Index (Liquidity/Risk Proxy)
+        "US10Y": "^TNX",      # US 10-Year Treasury Yield (Interest Rate Pressure)
+        "VIX": "^VIX"         # Volatility Index (Fear/Black Swan Monitor)
+    }
 
-        df.rename(columns={"DX-Y.NYB": "DXY", "^TNX": "US10Y"}, inplace=True)
+    @classmethod
+    async def fetch_macro_data(cls, period: str = "6mo") -> pd.DataFrame:
+        """
+        Asynchronously fetch macro data and build regime indicators.
+        """
+        try:
+            # Download all macro tickers synchronously
+            df = await asyncio.to_thread(yf.download, tickers=list(cls.TICKERS.values()), interval="1d", period=period, progress=False)
 
-        # Forward fill weekends/holidays
-        df = df.ffill().dropna()
+            if df.empty:
+                logger.error("Failed to fetch macroeconomic data.")
+                return pd.DataFrame()
 
-        # Calculate 50-day SMA for trend determination
-        df["DXY_SMA50"] = df["DXY"].rolling(window=50).mean()
-        df["US10Y_SMA50"] = df["US10Y"].rolling(window=50).mean()
+            # Flatten multi-index
+            if isinstance(df.columns, pd.MultiIndex):
+                # We need Close prices for each ticker
+                df = df['Close'].ffill().dropna()
+            else:
+                df = df.ffill().dropna()
 
-        return df.dropna()
+            # Ensure TZ naive
+            if df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
 
-    except Exception as e:
-        log.error(f"Failed to fetch macro data: {e}")
-        return pd.DataFrame()
+            # Calculate Regime Indicators (e.g. DXY 50 SMA)
+            # Use Pandas rolling to compute indicators
+            df['DXY_SMA50'] = df['DX-Y.NYB'].rolling(window=50).mean()
+            df['US10Y_SMA50'] = df['^TNX'].rolling(window=50).mean()
 
+            return df
 
-def get_market_regime() -> str:
-    """
-    Determines the current market regime based on DXY and US10Y trends.
-    Risk-Off = Tightening (Strong USD, Rising Yields) -> Avoid Long Commodities/EM FX
-    Risk-On = Loosening (Weak USD, Falling Yields)
-    """
-    df = fetch_macro_data()
-    if df.empty:
-        log.warning("Macro data empty. Defaulting to 'Neutral' regime.")
-        return "Neutral"
+        except Exception as e:
+            logger.error(f"Error fetching macro data: {e}")
+            return pd.DataFrame()
 
-    last_row = df.iloc[-1]
-
-    # If DXY and Yields are both above their 50-day SMA, it's a strong Risk-Off environment.
-    if last_row["DXY"] > last_row["DXY_SMA50"] and last_row["US10Y"] > last_row["US10Y_SMA50"]:
-        return "Risk-Off"
-
-    # If both are below, it's Risk-On.
-    elif last_row["DXY"] < last_row["DXY_SMA50"] and last_row["US10Y"] < last_row["US10Y_SMA50"]:
-        return "Risk-On"
-
-    return "Neutral"
-
-
-def is_black_swan_vix(threshold: float = 35.0) -> bool:
-    """
-    Monitors S&P 500 VIX (^VIX) for Black Swan / Extreme Panic events.
-    If VIX is above threshold, NO new long trades are allowed.
-    """
-    try:
-        df = yf.download("^VIX", period="5d", interval="1d", progress=False)["Close"]
-        if df.empty:
+    @staticmethod
+    def is_risk_off(macro_df: pd.DataFrame) -> bool:
+        """
+        Evaluates Risk-Off regime based on Macro Filters.
+        Returns True if DXY and US10Y are in strong uptrends (Tightening Phase).
+        """
+        if macro_df.empty or len(macro_df) < 50:
             return False
 
-        last_vix = df.iloc[-1].item() if isinstance(df.iloc[-1], pd.Series) else df.iloc[-1]
+        latest = macro_df.iloc[-1]
+        prev = macro_df.iloc[-2]
 
-        if last_vix > threshold:
-            log.critical(f"🚨 VIX CIRCUIT BREAKER ACTIVATED: {last_vix:.2f} > {threshold}")
+        # Risk-Off criteria: Dollar is strengthening, Yields are rising.
+        dxy_uptrend = latest['DX-Y.NYB'] > latest['DXY_SMA50']
+        us10y_uptrend = latest['^TNX'] > latest['US10Y_SMA50']
+
+        # Momentum check
+        dxy_mom = latest['DX-Y.NYB'] > prev['DX-Y.NYB']
+        us10y_mom = latest['^TNX'] > prev['^TNX']
+
+        is_risk_off = (dxy_uptrend and us10y_uptrend) and (dxy_mom or us10y_mom)
+
+        if is_risk_off:
+            logger.info("Macro Filter: RISK-OFF Regime Detected. (Strong DXY & US10Y)")
+
+        return is_risk_off
+
+    @staticmethod
+    def check_vix_circuit_breaker(macro_df: pd.DataFrame, threshold: float = 30.0) -> bool:
+        """
+        Black Swan & Flash Crash Protection (Phase 19).
+        If VIX spikes above threshold or jumps violently, halt new entries.
+        """
+        if macro_df.empty or len(macro_df) < 2:
+            return False
+
+        latest_vix = macro_df.iloc[-1]['^VIX']
+        prev_vix = macro_df.iloc[-2]['^VIX']
+
+        vix_spike_pct = (latest_vix - prev_vix) / prev_vix * 100
+
+        # Circuit Breaker triggers if VIX > 30 OR VIX spikes > 20% in one day
+        if latest_vix > threshold or vix_spike_pct > 20.0:
+            logger.critical(f"🚨 VIX CIRCUIT BREAKER TRIPPED! VIX at {latest_vix:.2f} (Spike: {vix_spike_pct:.2f}%). Halting new trades.")
             return True
 
         return False
-
-    except Exception as e:
-        log.error(f"VIX Check failed: {e}")
-        return False
-
-
-def is_flash_crash(df: pd.DataFrame, ticker: str, window: int = 50, z_threshold: float = 4.0) -> bool:
-    """
-    Micro Flash Crash detector using Z-Score Anomaly Detection on the LTF dataframe.
-    Calculates if the current price is anomalously far from its moving average.
-    """
-    if len(df) < window:
-        return False
-
-    try:
-        # Calculate Rolling Mean and Standard Deviation
-        rolling_mean = df['close'].rolling(window=window).mean()
-        rolling_std = df['close'].rolling(window=window).std()
-
-        # Calculate Z-Score of the most recent closed candle
-        current_price = df['close'].iloc[-1]
-        mean_val = rolling_mean.iloc[-1]
-        std_val = rolling_std.iloc[-1]
-
-        if pd.isna(mean_val) or pd.isna(std_val) or std_val == 0:
-            return False
-
-        z_score = abs((current_price - mean_val) / std_val)
-
-        if z_score > z_threshold:
-            log.critical(f"🚨 FLASH CRASH ANOMALY on {ticker}: Z-Score {z_score:.2f} > {z_threshold}")
-            return True
-
-        return False
-
-    except Exception as e:
-        log.error(f"Flash crash detection failed for {ticker}: {e}")
-        return False
-

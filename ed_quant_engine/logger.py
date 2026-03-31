@@ -1,43 +1,44 @@
 import logging
-import logging.handlers
 import os
-from logging import Logger
+import sys
+from logging.handlers import RotatingFileHandler
+from datetime import datetime
 
-LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
-if not os.path.exists(LOG_DIR):
-    os.makedirs(LOG_DIR)
+# Build logs directory
+LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+os.makedirs(LOGS_DIR, exist_ok=True)
 
-LOG_FILE = os.path.join(LOG_DIR, 'quant_engine.log')
+# Define formatter
+FORMATTER = logging.Formatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 
-
-def setup_logger(name: str = 'EDCapitalQuant') -> Logger:
-    """Configures professional logging with RotatingFileHandler to avoid disk bloat."""
+def setup_logger(name: str) -> logging.Logger:
+    """
+    Creates and returns a logger with rotating file handler and console handler.
+    Follows Quant standards for debugging and critical alerting.
+    """
     logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
 
-    # Prevent duplicate handlers
-    if not logger.handlers:
-        # File handler: 5MB per file, max 3 backups
-        file_handler = logging.handlers.RotatingFileHandler(
-            LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8'
-        )
-        file_handler.setLevel(logging.INFO)
+    # Prevent duplicate logs if initialized multiple times
+    if logger.hasHandlers():
+        logger.handlers.clear()
 
-        # Console handler for local debugging
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
+    # Console Handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(FORMATTER)
+    logger.addHandler(console_handler)
 
-        # Formatter
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        file_handler.setFormatter(formatter)
-        console_handler.setFormatter(formatter)
-
-        logger.addHandler(file_handler)
-        logger.addHandler(console_handler)
+    # File Handler (Rotating: Max 5MB per file, keep 3 backups)
+    log_file = os.path.join(LOGS_DIR, f"quant_engine_{datetime.now().strftime('%Y-%m')}.log")
+    file_handler = RotatingFileHandler(
+        log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8'
+    )
+    file_handler.setFormatter(FORMATTER)
+    logger.addHandler(file_handler)
 
     return logger
 
-log = setup_logger()
+# Global logger instance
+logger = setup_logger("EDCapital")

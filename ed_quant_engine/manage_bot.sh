@@ -1,38 +1,43 @@
 #!/bin/bash
+# Phase 9 & 25: Management Script & Docker Deployment
 
-# ED Capital Quant Engine - Yönetim ve Dağıtım Betiği
-
-DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 cd "$DIR"
 
-# Ensure log and models directories exist before starting Docker
-mkdir -p logs models reports
-touch paper_db.sqlite3 # Create empty DB file if it doesn't exist for Volume mapping
+function show_help {
+    echo "Usage: ./manage_bot.sh [start|stop|restart|logs|status]"
+    echo "Commands:"
+    echo "  start   - Builds and starts the Docker container in detached mode."
+    echo "  stop    - Stops and removes the Docker container safely."
+    echo "  restart - Stops, rebuilds, and restarts the container."
+    echo "  logs    - Tails the Docker logs."
+    echo "  status  - Checks if the container is running."
+}
 
 case "$1" in
     start)
-        echo "🚀 ED Capital Quant Engine başlatılıyor (Detached Mod)..."
+        echo "Starting ED Capital Quant Engine..."
         docker-compose up -d --build
+        echo "Container started. Run './manage_bot.sh logs' to view output."
         ;;
     stop)
-        echo "⏹️ ED Capital Quant Engine durduruluyor..."
+        echo "Stopping ED Capital Quant Engine..."
         docker-compose down
+        echo "Container stopped safely."
         ;;
     restart)
-        echo "🔄 ED Capital Quant Engine yeniden başlatılıyor..."
+        echo "Restarting ED Capital Quant Engine..."
         docker-compose down
         docker-compose up -d --build
+        echo "Container restarted."
         ;;
     logs)
-        echo "📜 Loglar takip ediliyor (Çıkmak için Ctrl+C)..."
         docker-compose logs -f --tail=100
         ;;
     status)
-        echo "ℹ️ ED Capital Quant Engine Konteyner Durumu:"
-        docker ps | grep ed_quant_engine
+        docker-compose ps
         ;;
     *)
-        echo "Kullanım: $0 {start|stop|restart|logs|status}"
-        # removed exit 1 to not block bash session
+        show_help
         ;;
 esac

@@ -1,71 +1,107 @@
 import sqlite3
 import os
-import pandas as pd
-from typing import List, Dict, Optional
-from datetime import datetime
+import threading
+from typing import Dict, Any, List, Optional
+from logger import logger
 
-# Local SQLite DB to avoid paid DB infrastructure.
-DB_PATH = os.path.join(os.path.dirname(__file__), 'paper_db.sqlite3')
+DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'paper_db.sqlite3')
+os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
 
-def init_db() -> None:
-    """Initializes the SQLite database with the required 'trades' table."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS trades (
-            trade_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker TEXT NOT NULL,
-            direction TEXT NOT NULL,
-            entry_time TEXT NOT NULL,
-            entry_price REAL NOT NULL,
-            sl_price REAL NOT NULL,
-            tp_price REAL NOT NULL,
-            position_size REAL NOT NULL,
-            status TEXT NOT NULL, -- 'Open' or 'Closed'
-            exit_time TEXT,
-            exit_price REAL,
-            pnl REAL,
-            highest_price REAL, -- For Trailing Stop calculation
-            lowest_price REAL   -- For Trailing Stop calculation
-        )
-    ''')
-    conn.commit()
-    conn.close()
+class PaperDB:
+    """
+    Lightweight SQLite Database Manager for tracking paper trades,
+    Pnl, and execution details locally without paid databases.
+    Follows Quant standards for atomicity and local persistence.
+    """
+    _local = threading.local()
 
-def execute_query(query: str, parameters: tuple = ()) -> None:
-    """Executes an INSERT/UPDATE/DELETE query securely using sqlite3."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(query, parameters)
-    conn.commit()
-    conn.close()
+    @classmethod
+    def get_connection(cls):
+        """Thread-local SQLite connection."""
+        if not hasattr(cls._local, "connection"):
+            cls._local.connection = sqlite3.connect(DB_FILE, check_same_thread=False)
+            cls._local.connection.row_factory = sqlite3.Row
+        return cls._local.connection
 
-def fetch_query(query: str, parameters: tuple = ()) -> List[tuple]:
-    """Fetches data from SQLite and returns a list of tuples."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(query, parameters)
-    results = cursor.fetchall()
-    conn.close()
-    return results
+    @classmethod
+    def initialize_db(cls):
+        """Creates the necessary tables if they do not exist."""
+        try:
+            conn = cls.get_connection()
+            cursor = conn.cursor()
 
-def fetch_dataframe(query: str, parameters: tuple = ()) -> pd.DataFrame:
-    """Fetches data directly into a Pandas DataFrame for vectorized reporting."""
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(query, conn, params=parameters)
-    conn.close()
-    return df
+            # Trades table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS trades (
+                    trade_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    entry_time TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    sl_price REAL NOT NULL,
+                    tp_price REAL NOT NULL,
+                    position_size REAL NOT NULL,
+                    status TEXT NOT NULL,
+                    exit_time TEXT,
+                    exit_price REAL,
+                    pnl REAL,
+                    net_pnl REAL,
+                    spread REAL,
+                    slippage REAL,
+                    reason TEXT
+                )
+            ''')
 
-def get_open_trades() -> List[Dict]:
-    """Retrieves all currently 'Open' trades as a list of dictionaries."""
-    query = "SELECT * FROM trades WHERE status = 'Open'"
-    rows = fetch_query(query)
-    columns = [
-        'trade_id', 'ticker', 'direction', 'entry_time', 'entry_price',
-        'sl_price', 'tp_price', 'position_size', 'status', 'exit_time',
-        'exit_price', 'pnl', 'highest_price', 'lowest_price'
-    ]
-    return [dict(zip(columns, row)) for row in rows]
+            # State table (Balance tracking)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS state (
+                    key TEXT PRIMARY KEY,
+                    value REAL NOT NULL
+                )
+            ''')
 
-# Initialize on import
-init_db()
+            # Initialize starting balance if empty
+            cursor.execute('SELECT value FROM state WHERE key="balance"')
+            if cursor.fetchone() is None:
+                start_balance = float(os.getenv("PAPER_STARTING_BALANCE", 10000.0))
+                cursor.execute('INSERT INTO state (key, value) VALUES (?, ?)', ('balance', start_balance))
+
+            conn.commit()
+            logger.info("Local SQLite Database initialized successfully.")
+        except Exception as e:
+            logger.critical(f"Failed to initialize SQLite Database: {e}")
+
+    @classmethod
+    def execute_query(cls, query: str, params: tuple = ()) -> sqlite3.Cursor:
+        conn = cls.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        conn.commit()
+        return cursor
+
+    @classmethod
+    def fetch_all(cls, query: str, params: tuple = ()) -> List[sqlite3.Row]:
+        cursor = cls.execute_query(query, params)
+        return cursor.fetchall()
+
+    @classmethod
+    def fetch_one(cls, query: str, params: tuple = ()) -> Optional[sqlite3.Row]:
+        cursor = cls.execute_query(query, params)
+        return cursor.fetchone()
+
+    @classmethod
+    def update_balance(cls, amount: float):
+        """Updates the current balance."""
+        conn = cls.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE state SET value = value + ? WHERE key = 'balance'", (amount,))
+        conn.commit()
+
+    @classmethod
+    def get_balance(cls) -> float:
+        """Gets current balance."""
+        row = cls.fetch_one("SELECT value FROM state WHERE key='balance'")
+        return row['value'] if row else 0.0
+
+# Initialize immediately
+PaperDB.initialize_db()

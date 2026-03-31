@@ -4,17 +4,15 @@ services:
   quant_engine:
     build: .
     container_name: ed_quant_engine
-    restart: always # Otonom kurtarma / Recovery
+    restart: always
     environment:
-      - TZ=Europe/Istanbul # Kritik zaman dilimi senkronizasyonu
+      - TZ=Europe/Istanbul # Synchronization of market time
     env_file:
-      - .env # Telegram tokenleri ve gizli veriler
+      - .env
     volumes:
-      # Veritabanı ve modeller kalıcı olmalı (Host makineye bağlanmalı)
-      - ./paper_db.sqlite3:/app/paper_db.sqlite3
-      - ./models:/app/models
-      - ./logs:/app/logs
-      - ./reports:/app/reports
+      - ./data:/app/data        # Critical: Persistent Local DB & ML Models
+      - ./logs:/app/logs        # Critical: Persistent Logs for auditing
+      - ./reports:/app/reports  # Persistent Tear Sheets
     logging:
       driver: "json-file"
       options:

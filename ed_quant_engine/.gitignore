@@ -1,30 +1,54 @@
-# Security
-.env
-secret.key
-
-# Virtual Environment
-venv/
-.venv/
-env/
-
-# Python Cache
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+.venv/
+.env/
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 
 # IDEs
 .vscode/
 .idea/
-.DS_Store
+*.swp
+*.swo
 
-# Data and Models
-data/
-paper_db.sqlite3
-*.db
-models/*.pkl
-models/*.joblib
+# Project specific
+data/*.sqlite3
+data/*.db
+data/*.pkl
 logs/*.log
-
-# Reports
 reports/*.pdf
 reports/*.html

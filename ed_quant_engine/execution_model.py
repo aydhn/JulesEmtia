@@ -1,65 +1,76 @@
 import pandas as pd
 import numpy as np
-from typing import Dict, Tuple
+from logger import logger
 
-from logger import log
-from data_loader import UNIVERSE
-
-# Asset Class Base Spread Definitions (Realistic trading costs)
-BASE_SPREADS = {
-    "Major_Commodities": 0.0002, # 0.02%
-    "Minor_Commodities": 0.0005, # 0.05%
-    "TRY_Forex": 0.0010          # 0.10% (Wide spread on exotics)
-}
-
-def get_asset_class(ticker: str) -> str:
-    """Helper to classify a ticker to assign realistic spreads."""
-    if ticker in ["GC=F", "CL=F", "BZ=F"]:
-        return "Major_Commodities"
-    elif "TRY" in ticker:
-        return "TRY_Forex"
-    else:
-        return "Minor_Commodities"
-
-def calculate_dynamic_execution_price(ticker: str, direction: str, current_price: float, df: pd.DataFrame, atr_multiplier: float = 1.0) -> Tuple[float, float, float]:
+class ExecutionSimulator:
     """
-    Simulates real-world execution costs: Bid/Ask Spread + Volatility-adjusted Slippage.
-    Returns: (Executed_Price, Spread_Cost, Slippage_Cost)
+    Phase 21: Dynamic Spread & Slippage (Execution Modeling).
+    Converts theoretical signals into realistic execution prices.
+    Adds brutal realities like Bid/Ask spread and Volatility-adjusted slippage.
     """
-    if df.empty or 'ATR_14' not in df.columns:
-        log.warning(f"Execution Model: ATR missing for {ticker}. Using flat 0.1% cost.")
-        flat_cost = current_price * 0.001
-        executed_price = current_price + flat_cost if direction == "Long" else current_price - flat_cost
-        return executed_price, flat_cost/2, flat_cost/2
 
-    try:
-        # Determine Base Spread
-        asset_class = get_asset_class(ticker)
-        base_spread = current_price * BASE_SPREADS[asset_class]
+    # Base Spread Table (Estimated percentage of price)
+    SPREADS = {
+        "Gold": 0.0002, "Silver": 0.0005, "Copper": 0.0008,
+        "Palladium": 0.0015, "Platinum": 0.0010,
+        "WTI Crude Oil": 0.0003, "Brent Crude Oil": 0.0003, "Natural Gas": 0.0015,
+        "Wheat": 0.0008, "Corn": 0.0008, "Soybeans": 0.0008,
+        "USD/TRY": 0.0010, "EUR/TRY": 0.0012, "GBP/TRY": 0.0015  # Exotics have wider spreads
+    }
 
-        # Dynamic Slippage (ATR adjusted)
-        current_atr = df['ATR_14'].iloc[-1]
-        historical_atr_mean = df['ATR_14'].mean()
+    # Default spread for unknown tickers
+    DEFAULT_SPREAD = 0.0005
 
-        # If current volatility is 50% higher than average, slippage doubles.
-        volatility_ratio = current_atr / historical_atr_mean if historical_atr_mean > 0 else 1.0
-        slippage_cost = (current_atr * 0.05) * volatility_ratio * atr_multiplier # Assume 5% of ATR is normal slippage
+    @classmethod
+    def get_base_spread(cls, ticker_name: str) -> float:
+        """Returns the base spread percentage for a given asset."""
+        for key, spread in cls.SPREADS.items():
+            if key in ticker_name:
+                return spread
+        return cls.DEFAULT_SPREAD
 
-        # Total cost is Spread + Slippage
-        total_penalty = (base_spread / 2) + slippage_cost
+    @classmethod
+    def calculate_slippage(cls, current_atr: float, avg_atr_50: float) -> float:
+        """
+        Volatility-Based Dynamic Slippage.
+        If current volatility (ATR) is 50% higher than historical average, double the slippage penalty.
+        Returns slippage as a percentage.
+        """
+        base_slippage = 0.0001 # 0.01% base slippage
 
-        # Calculate Executed Price
-        if direction == "Long":
-            executed_price = current_price + total_penalty # You buy higher than the market
-        elif direction == "Short":
-            executed_price = current_price - total_penalty # You sell lower than the market
+        if current_atr > avg_atr_50 * 1.5:
+            logger.warning(f"High Volatility Execution Penalty! Slippage doubled. (ATR {current_atr:.4f} > {avg_atr_50 * 1.5:.4f})")
+            return base_slippage * 2.0
+
+        return base_slippage
+
+    @classmethod
+    def execute_trade_price(cls, ticker_name: str, raw_price: float, direction: int, atr_data: pd.Series) -> float:
+        """
+        Calculates the exact entry/exit price considering Spread + Slippage.
+        direction: 1 (Buy/Long) or -1 (Sell/Short)
+        """
+        base_spread_pct = cls.get_base_spread(ticker_name)
+
+        # Current ATR and Average ATR (over 50 periods)
+        current_atr = atr_data.iloc[-1]
+        avg_atr_50 = atr_data.rolling(window=50).mean().iloc[-1]
+
+        # Dynamic slippage calculation
+        slippage_pct = cls.calculate_slippage(current_atr, avg_atr_50)
+
+        # Total cost factor (half the spread + full slippage)
+        cost_factor = (base_spread_pct / 2.0) + slippage_pct
+
+        if direction == 1:
+            # Buying (Pay the Ask: Price + Cost)
+            execution_price = raw_price * (1.0 + cost_factor)
         else:
-            executed_price = current_price
-            total_penalty = 0
+            # Selling (Hit the Bid: Price - Cost)
+            execution_price = raw_price * (1.0 - cost_factor)
 
-        return executed_price, (base_spread / 2), slippage_cost
+        # Log the brutal reality
+        cost_bps = cost_factor * 10000
+        logger.debug(f"Execution Modeling [{ticker_name}]: Raw {raw_price:.4f} -> Exec {execution_price:.4f} (Cost: {cost_bps:.1f} bps)")
 
-    except Exception as e:
-        log.error(f"Execution model failed for {ticker}: {e}. Defaulting to market price.")
-        return current_price, 0.0, 0.0
-
+        return execution_price
