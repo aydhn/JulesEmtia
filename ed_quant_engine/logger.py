@@ -1,34 +1,31 @@
 import logging
-import os
 from logging.handlers import RotatingFileHandler
+import os
 
-# Create logs directory if it doesn't exist
-os.makedirs("logs", exist_ok=True)
+LOG_DIR = "logs"
+if not os.path.exists(LOG_DIR):
+    os.makedirs(LOG_DIR)
 
-# Format for the logs
-formatter = logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+LOG_FILE = os.path.join(LOG_DIR, "quant_bot.log")
+LOG_LEVEL_ENV = os.getenv("LOG_LEVEL", "INFO")
 
-# Set up the root logger
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
+def setup_logger(name: str) -> logging.Logger:
+    """Configures a professional rotating file logger suitable for long-running daemons."""
+    logger = logging.getLogger(name)
+    logger.setLevel(LOG_LEVEL_ENV)
 
-# Console handler
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(formatter)
-root_logger.addHandler(console_handler)
+    if not logger.handlers:
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# File handler with rotation (max 5MB, keep 3 backups)
-file_handler = RotatingFileHandler(
-    "logs/ed_quant.log", maxBytes=5 * 1024 * 1024, backupCount=3
-)
-file_handler.setFormatter(formatter)
-root_logger.addHandler(file_handler)
+        # Rotating File Handler (Max 5MB per file, keep 3 backups)
+        file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=3)
+        file_handler.setFormatter(formatter)
 
+        # Stream Handler (Console for Docker logs / tail)
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
 
-def get_logger(name: str) -> logging.Logger:
-    """
-    Returns a configured logger for the given name.
-    """
-    return logging.getLogger(name)
+        logger.addHandler(file_handler)
+        logger.addHandler(stream_handler)
+
+    return logger

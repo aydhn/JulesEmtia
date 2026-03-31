@@ -1,13 +1,35 @@
-__pycache__/
-*.py[cod]
-*$py.class
+# Security
 .env
-data/*.sqlite3
-logs/*.log
-models/*.pkl
-models/*.joblib
-.vscode/
-.idea/
+
+# Virtual Environment
 venv/
 env/
 .venv/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local Databases (Crucial: Do not commit state!)
+*.sqlite3
+*.db
+paper_db.sqlite3
+
+# Logs
+logs/
+*.log
+
+# Machine Learning Models (Local state)
+*.pkl
+*.joblib
+rf_model.pkl
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+
+# OS generated files
+.DS_Store
+Thumbs.db

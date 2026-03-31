@@ -4,134 +4,88 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 import joblib
 import os
-import asyncio
-from typing import Tuple, Optional
-from logger import logger
+from features import add_features
+from logger import setup_logger
 
-class MLValidator:
-    """
-    Phase 18: Machine Learning Signal Validation
-    Uses RandomForest to validate technical signals.
-    Trains locally (zero-budget) to prevent curve-fitting and false positives.
-    """
+logger = setup_logger("MLValidator")
 
-    MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'rf_model.pkl')
+MODEL_PATH = "rf_model.pkl"
 
-    # Feature columns expected by the model
-    FEATURES = [
-        'RSI_14', 'MACD', 'MACD_Hist', 'MACD_Signal',
-        'ATR_14', 'Z_Score_50', 'Log_Return', 'Prev_Return'
-    ]
+def train_and_save_model(historical_data: pd.DataFrame, ticker: str):
+    """Trains a Random Forest Classifier to validate signals. Calculates Win/Loss labels on historical data."""
+    if historical_data.empty or len(historical_data) < 500:
+        logger.warning(f"Yeterli veri yok, ML modeli eğitilemedi: {ticker}")
+        return
 
-    @classmethod
-    def _create_labels(cls, df: pd.DataFrame, forward_periods: int = 5, profit_threshold: float = 0.005) -> pd.DataFrame:
-        """
-        Creates binary target variable (y) for training.
-        1: Price increased by > profit_threshold in next 'N' periods (Successful Long)
-        0: Failed or went down.
-        Zero Lookahead Bias: Target is strictly based on future returns shifted backward.
-        """
-        df = df.copy()
+    # Add technical features
+    df = add_features(historical_data)
 
-        # Calculate future return (forward-looking strictly for labeling training data)
-        df['Future_Return'] = df['Close'].shift(-forward_periods) / df['Close'] - 1
+    # Create Labels (Target Variable)
+    # 1: Trade was profitable (hit TP before SL within N bars)
+    # 0: Trade was unprofitable (hit SL or timed out)
+    # Simplified approach: Look ahead N bars, if max high > entry + TP distance, label 1.
 
-        # Labeling rules: 1 if hit target, 0 otherwise
-        df['Target'] = np.where(df['Future_Return'] > profit_threshold, 1, 0)
+    # We use a simple future return proxy here for demonstration
+    # Shift(-N) looks into the future. This is ONLY for training, NOT for live execution!
+    N_BARS = 10
+    df['Future_Return'] = df['Close'].shift(-N_BARS) / df['Close'] - 1
 
-        # Drop NaN targets (the last N rows)
-        df.dropna(subset=['Target'], inplace=True)
-        return df
+    # If it gained more than 0.5% in N bars, we consider it a 'Win' (1), else 'Loss' (0)
+    df['Target'] = np.where(df['Future_Return'] > 0.005, 1, 0)
 
-    @classmethod
-    def train_model(cls, historical_data: dict[str, pd.DataFrame]) -> None:
-        """
-        Trains RandomForest using aggregated historical data from multiple tickers.
-        """
-        logger.info("Starting ML model training...")
+    # Drop rows with NaN targets (the last N rows)
+    df.dropna(subset=['Target'], inplace=True)
 
-        all_features = []
-        all_targets = []
+    # Select Features (X)
+    features = ['EMA_50', 'EMA_200', 'RSI_14', 'MACDh_12_26_9', 'ATRr_14', 'Log_Return']
 
-        for ticker, data in historical_data.items():
-            if data is None or data.empty:
-                continue
-
-            labeled_data = cls._create_labels(data)
-
-            # Select features and targets
-            X = labeled_data[cls.FEATURES]
-            y = labeled_data['Target']
-
-            all_features.append(X)
-            all_targets.append(y)
-
-        if not all_features:
-            logger.warning("No data available for ML training.")
+    # Ensure all features exist
+    for f in features:
+        if f not in df.columns:
+            logger.error(f"Eksik özellik: {f}. ML Eğitimi İptal.")
             return
 
-        # Combine all tickers into a single training set
-        X_train = pd.concat(all_features, axis=0)
-        y_train = pd.concat(all_targets, axis=0)
+    X = df[features]
+    y = df['Target']
 
-        # Clean NaNs and infinite values
-        X_train.replace([np.inf, -np.inf], np.nan, inplace=True)
-        valid_idx = X_train.dropna().index
-        X_train = X_train.loc[valid_idx]
-        y_train = y_train.loc[valid_idx]
+    # Train/Test Split
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-        logger.info(f"Training RandomForest with {len(X_train)} samples across universe.")
+    # Train Random Forest (Shallow depth to prevent overfitting)
+    clf = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=-1)
+    clf.fit(X_train, y_train)
 
-        # Initialize and Train Model
-        clf = RandomForestClassifier(
-            n_estimators=100,
-            max_depth=5,       # Shallow depth to prevent overfitting
-            min_samples_leaf=20,
-            random_state=42,
-            n_jobs=-1          # Use all CPU cores
-        )
+    # Evaluate
+    score = clf.score(X_test, y_test)
+    logger.info(f"ML Modeli Eğitildi [{ticker}] - Out-of-Sample Doğruluk: %{score*100:.2f}")
 
-        clf.fit(X_train, y_train)
+    # Save Model
+    joblib.dump(clf, MODEL_PATH)
+    logger.info(f"Model diske kaydedildi: {MODEL_PATH}")
 
-        # Save model locally (Joblib is efficient for NumPy arrays)
-        joblib.dump(clf, cls.MODEL_PATH)
-        logger.info(f"ML Model trained and saved to {cls.MODEL_PATH}.")
+def validate_signal_with_ml(current_features: pd.Series, threshold: float = 0.60) -> bool:
+    """Uses the trained model to predict the probability of success for a new signal."""
+    if not os.path.exists(MODEL_PATH):
+        logger.warning("ML Modeli bulunamadı. Veto devre dışı bırakılıyor (Pass-through).")
+        return True # Pass if no model
 
-    @classmethod
-    async def async_train_model(cls, historical_data: dict[str, pd.DataFrame]) -> None:
-        """Asynchronous wrapper for scheduled weekend retraining."""
-        await asyncio.to_thread(cls.train_model, historical_data)
+    try:
+        clf = joblib.load(MODEL_PATH)
+        features = ['EMA_50', 'EMA_200', 'RSI_14', 'MACDh_12_26_9', 'ATRr_14', 'Log_Return']
 
-    @classmethod
-    def validate_signal(cls, current_features: pd.Series, threshold: float = 0.60) -> Tuple[bool, float]:
-        """
-        Validates a technical signal using the trained ML model.
-        Returns (is_approved, probability).
-        """
-        try:
-            if not os.path.exists(cls.MODEL_PATH):
-                logger.warning("ML Model not found! Bypassing ML Validation.")
-                return True, 0.5
+        # Extract features into 2D array for prediction
+        X_live = np.array([current_features[features].values])
 
-            clf = joblib.load(cls.MODEL_PATH)
+        # Predict probability of class 1 (Win)
+        prob_win = clf.predict_proba(X_live)[0][1]
 
-            # Extract relevant features
-            X_current = current_features[cls.FEATURES].to_frame().T
-            X_current.replace([np.inf, -np.inf], np.nan, inplace=True)
-            X_current.fillna(0, inplace=True) # Handle missing
+        if prob_win >= threshold:
+            logger.info(f"ML Onayı Başarılı: Kazanma İhtimali %{prob_win*100:.2f}")
+            return True
+        else:
+            logger.warning(f"ML Vetosu: Kazanma İhtimali Düşük (%{prob_win*100:.2f} < %{threshold*100:.0f}). Sinyal Reddedildi.")
+            return False
 
-            # Predict Probability of Success (Class 1)
-            prob_success = clf.predict_proba(X_current)[0][1]
-
-            is_approved = prob_success >= threshold
-
-            if not is_approved:
-                logger.warning(f"ML Veto: Signal rejected. Probability {prob_success:.2f} < {threshold}.")
-            else:
-                logger.info(f"ML Approval: Signal probability {prob_success:.2f} >= {threshold}.")
-
-            return is_approved, prob_success
-
-        except Exception as e:
-            logger.error(f"Error during ML signal validation: {e}")
-            return True, 0.5 # Fail-open in case of error
+    except Exception as e:
+        logger.error(f"ML Doğrulama hatası: {str(e)}")
+        return True # Fail open

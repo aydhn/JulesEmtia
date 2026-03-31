@@ -1,99 +1,30 @@
 import yfinance as yf
 import pandas as pd
 import asyncio
-import gc
-from typing import Dict, Optional, Tuple
-from logger import logger
+from logger import setup_logger
 
-class DataLoader:
-    """
-    Data Ingestion Engine.
-    Fetches Multi-Timeframe (MTF) OHLCV data from Yahoo Finance via yfinance.
-    Follows Quant standards for NaN handling, Forward Filling, and Rate Limits.
-    """
+logger = setup_logger("DataLoader")
 
-    TICKERS = {
-        # Precious Metals
-        "Gold": "GC=F", "Silver": "SI=F", "Copper": "HG=F",
-        "Palladium": "PA=F", "Platinum": "PL=F",
+async def fetch_historical_data(ticker: str, period: str = "2y", interval: str = "1d") -> pd.DataFrame:
+    """Asynchronously fetches historical data for MTF backtesting and ML training."""
+    try:
+        data = await asyncio.to_thread(yf.download, ticker, period=period, interval=interval, progress=False)
+        if data.empty:
+            logger.warning(f"Geçmiş veri alınamadı: {ticker}")
+            return pd.DataFrame()
 
-        # Energy
-        "WTI Crude Oil": "CL=F", "Brent Crude Oil": "BZ=F",
-        "Natural Gas": "NG=F", "Heating Oil": "HO=F", "Gasoline": "RB=F",
+        # Flatten multi-index columns if present
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = [col[0] for col in data.columns]
 
-        # Agriculture & Softs
-        "Wheat": "ZW=F", "Corn": "ZC=F", "Soybeans": "ZS=F",
-        "Coffee": "KC=F", "Cocoa": "CC=F", "Sugar": "SB=F",
-        "Cotton": "CT=F", "Live Cattle": "LE=F",
+        data.index = pd.to_datetime(data.index)
+        data.index = data.index.tz_localize(None) # Strip timezone for pure calculations
 
-        # Forex (TRY-based Pairs)
-        "USD/TRY": "USDTRY=X", "EUR/TRY": "EURTRY=X", "GBP/TRY": "GBPTRY=X",
-        "JPY/TRY": "JPYTRY=X", "CNH/TRY": "CNHY=X", "CHF/TRY": "CHFTRY=X",
-        "AUD/TRY": "AUDTRY=X"
-    }
+        return data
+    except Exception as e:
+        logger.error(f"Geçmiş veri çekme hatası ({ticker}): {str(e)}")
+        return pd.DataFrame()
 
-    @staticmethod
-    def _fetch_sync(ticker: str, timeframe: str, period: str) -> Optional[pd.DataFrame]:
-        """
-        Synchronous fetch using yfinance.
-        Handles retries, rate-limits, and NaN cleaning.
-        """
-        try:
-            # yfinance returns tz-aware data for some pairs
-            df = yf.download(tickers=ticker, interval=timeframe, period=period, progress=False, timeout=15)
-
-            if df.empty:
-                logger.warning(f"No data returned for {ticker} at {timeframe}")
-                return None
-
-            # Flatten multi-index columns if they exist
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.droplevel(1)
-
-            # Strip timezone to avoid merging conflicts (MTF)
-            if df.index.tz is not None:
-                df.index = df.index.tz_localize(None)
-
-            # Clean NaNs: Forward fill missing values due to holidays/weekends
-            df.ffill(inplace=True)
-            df.dropna(inplace=True)
-
-            return df
-
-        except Exception as e:
-            logger.error(f"Error fetching data for {ticker} ({timeframe}): {e}")
-            return None
-
-    @classmethod
-    async def fetch_mtf_data(cls, ticker: str, period: str = "1mo") -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
-        """
-        Asynchronously fetches both Daily (1d) and Hourly (1h) data.
-        MTF Pipeline: 1D for Trend, 1H for Entry.
-        """
-        logger.info(f"Fetching MTF data for {ticker}...")
-
-        # Async tasks to prevent blocking main loop
-        daily_task = asyncio.to_thread(cls._fetch_sync, ticker, "1d", period)
-        hourly_task = asyncio.to_thread(cls._fetch_sync, ticker, "1h", period)
-
-        daily_df, hourly_df = await asyncio.gather(daily_task, hourly_task)
-
-        # Garbage collection hint for RAM efficiency
-        gc.collect()
-
-        return daily_df, hourly_df
-
-    @classmethod
-    async def get_all_universe_data(cls) -> Dict[str, Tuple[pd.DataFrame, pd.DataFrame]]:
-        """Fetches data for entire universe. Uses Exponential Backoff logic internally inside yfinance"""
-        universe_data = {}
-        for name, ticker in cls.TICKERS.items():
-            daily, hourly = await cls.fetch_mtf_data(ticker, "2y")
-            if daily is not None and hourly is not None:
-                universe_data[name] = (daily, hourly)
-
-            # Rate limit protection
-            await asyncio.sleep(0.5)
-
-        return universe_data
-
+async def fetch_live_data(ticker: str, interval: str = "1h") -> pd.DataFrame:
+    """Fetches the latest data point for live trading. Implements basic retry logic implicitly via async wrappers."""
+    return await fetch_historical_data(ticker, period="60d", interval=interval)

@@ -1,19 +1,21 @@
 [Unit]
 Description=ED Capital Quant Engine Daemon
-After=network.target docker.service
-Requires=docker.service
+After=network.target
 
 [Service]
 Type=simple
 User=root
-# Change WorkingDirectory to the actual path of your project
-WorkingDirectory=/path/to/your/ed_quant_engine
-ExecStart=/usr/local/bin/docker-compose up
-ExecStop=/usr/local/bin/docker-compose down
+# Change WorkingDirectory to the actual absolute path of ed_quant_engine
+WorkingDirectory=/path/to/ed_quant_engine
+# Use the virtual environment's Python executable
+ExecStart=/path/to/ed_quant_engine/venv/bin/python /path/to/ed_quant_engine/main.py
 Restart=always
 RestartSec=10
-StandardOutput=journal
-StandardError=journal
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=quant_engine
+Environment=TZ=Europe/Istanbul
+EnvironmentFile=/path/to/ed_quant_engine/.env
 
 [Install]
 WantedBy=multi-user.target

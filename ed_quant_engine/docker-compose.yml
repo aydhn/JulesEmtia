@@ -3,16 +3,19 @@ version: '3.8'
 services:
   quant_engine:
     build: .
-    container_name: ed_quant_engine
-    restart: always
+    container_name: ed_capital_quant
+    restart: unless-stopped
     env_file:
       - .env
     volumes:
-      - ./data:/app/data
+      - ./paper_db.sqlite3:/app/paper_db.sqlite3
       - ./logs:/app/logs
-      - ./models:/app/models
+      - ./reports:/app/reports
+      - ./rf_model.pkl:/app/rf_model.pkl
     environment:
       - TZ=Europe/Istanbul
+      - LOG_LEVEL=INFO
+      - PYTHONUNBUFFERED=1
     logging:
       driver: "json-file"
       options:

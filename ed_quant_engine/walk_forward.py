@@ -1,106 +1,91 @@
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, List
-from backtester import VectorizedBacktester
-from logger import logger
+from datetime import datetime, timedelta
+from data_loader import fetch_historical_data
+from backtester import run_historical_backtest
+from logger import setup_logger
 
-class WalkForwardOptimizer:
-    """
-    Phase 14: Walk-Forward Optimization (WFO) Engine.
-    Prevents Overfitting (Curve Fitting) by slicing data into In-Sample (IS) and Out-of-Sample (OOS) windows.
-    Zero-budget rolling window analysis.
-    """
+logger = setup_logger("WalkForward")
 
-    @classmethod
-    def run_wfo(cls, ticker: str, daily_df: pd.DataFrame, hourly_df: pd.DataFrame, is_months: int = 24, oos_months: int = 6) -> pd.DataFrame:
-        """
-        Executes a Walk-Forward Optimization routine on a given asset.
-        Slices the historical data into rolling windows.
-        is_months: In-Sample training period (e.g. 24 months)
-        oos_months: Out-of-Sample testing period (e.g. 6 months)
-        Returns a DataFrame summarizing WFE (Walk-Forward Efficiency) for each window.
-        """
-        if hourly_df.empty or daily_df.empty:
-            logger.warning(f"Insufficient data for WFO on {ticker}.")
-            return pd.DataFrame()
+def run_walk_forward_optimization(ticker: str, start_date: str = "2018-01-01", is_window_months: int = 24, oos_window_months: int = 6):
+    """Executes a Walk-Forward Optimization (WFO) to test parameter robustness and avoid curve-fitting."""
+    logger.info(f"Walk-Forward Optimizasyonu Başlatılıyor [{ticker}] (IS: {is_window_months} Ay, OOS: {oos_window_months} Ay)")
 
-        # Ensure index is datetime
-        hourly_df.index = pd.to_datetime(hourly_df.index)
-        daily_df.index = pd.to_datetime(daily_df.index)
+    # Normally WFO involves optimizing parameters over IS and testing over OOS.
+    # Since our strategy parameters are fixed for simplicity in this skeleton,
+    # we will just calculate the Walk-Forward Efficiency (WFE) of our core strategy across rolling windows.
 
-        start_date = hourly_df.index.min()
-        end_date = hourly_df.index.max()
+    # Convert dates
+    current_start = datetime.strptime(start_date, "%Y-%m-%d")
+    end_date_dt = datetime.now() - timedelta(days=30) # Stop testing a month ago
 
-        # Calculate window size in days
-        is_days = is_months * 30
-        oos_days = oos_months * 30
+    results = []
 
-        results = []
+    while True:
+        # Calculate In-Sample End
+        is_end = current_start + timedelta(days=is_window_months*30)
 
-        current_start = start_date
-        window_idx = 1
+        # Calculate Out-of-Sample End
+        oos_end = is_end + timedelta(days=oos_window_months*30)
 
-        while True:
-            is_end = current_start + pd.Timedelta(days=is_days)
-            oos_end = is_end + pd.Timedelta(days=oos_days)
+        if oos_end > end_date_dt:
+            break # Stop if we run out of data
 
-            if oos_end > end_date:
-                break # We've reached the end of our dataset
+        is_start_str = current_start.strftime("%Y-%m-%d")
+        is_end_str = is_end.strftime("%Y-%m-%d")
+        oos_end_str = oos_end.strftime("%Y-%m-%d")
 
-            # Slice the data
-            is_hourly = hourly_df[(hourly_df.index >= current_start) & (hourly_df.index < is_end)]
-            is_daily = daily_df[(daily_df.index >= current_start) & (daily_df.index < is_end)]
+        logger.info(f"Pencere Çalıştırılıyor: IS [{is_start_str} -> {is_end_str}], OOS [{is_end_str} -> {oos_end_str}]")
 
-            oos_hourly = hourly_df[(hourly_df.index >= is_end) & (hourly_df.index < oos_end)]
-            oos_daily = daily_df[(daily_df.index >= is_end) & (daily_df.index < oos_end)]
+        # Run Backtest over IS
+        is_results = run_historical_backtest(ticker, start_date=is_start_str, end_date=is_end_str)
+        if not is_results:
+            current_start += timedelta(days=oos_window_months*30) # Slide window forward
+            continue
 
-            logger.info(f"Running WFO Window {window_idx}: IS ({current_start.date()} to {is_end.date()}), OOS ({is_end.date()} to {oos_end.date()})")
+        # Run Backtest over OOS
+        oos_results = run_historical_backtest(ticker, start_date=is_end_str, end_date=oos_end_str)
+        if not oos_results:
+            current_start += timedelta(days=oos_window_months*30)
+            continue
 
-            # Run Backtests
-            is_trades = VectorizedBacktester.run_backtest(ticker, is_daily, is_hourly)
-            oos_trades = VectorizedBacktester.run_backtest(ticker, oos_daily, oos_hourly)
+        # Calculate Annualized PnL to normalize comparison
+        is_ann_pnl = is_results['net_pnl'] / (is_window_months / 12)
+        oos_ann_pnl = oos_results['net_pnl'] / (oos_window_months / 12)
 
-            is_metrics = VectorizedBacktester.analyze_results(is_trades)
-            oos_metrics = VectorizedBacktester.analyze_results(oos_trades)
+        # Walk-Forward Efficiency (WFE)
+        # Ratio of OOS Annualized Return to IS Annualized Return
+        wfe = (oos_ann_pnl / is_ann_pnl) * 100 if is_ann_pnl > 0 else 0
 
-            # Calculate Walk-Forward Efficiency (WFE)
-            # WFE = Annualized OOS Profit / Annualized IS Profit
-            is_annual_pnl = is_metrics['Total PnL'] / (is_months / 12.0) if is_months > 0 else 0
-            oos_annual_pnl = oos_metrics['Total PnL'] / (oos_months / 12.0) if oos_months > 0 else 0
+        is_overfitted = wfe < 50.0 # If OOS performance is less than 50% of IS, strategy is likely overfit.
 
-            wfe = 0.0
-            if is_annual_pnl > 0:
-                wfe = (oos_annual_pnl / is_annual_pnl) * 100.0
+        logger.info(f"WFO Sonuç: IS PnL(Yıllık): ${is_ann_pnl:.2f} | OOS PnL(Yıllık): ${oos_ann_pnl:.2f} | WFE: %{wfe:.2f} | Overfit: {is_overfitted}")
 
-            # Robustness Check (Is WFE > 50%?)
-            is_robust = wfe >= 50.0 and oos_metrics['Total PnL'] > 0
+        results.append({
+            "is_start": is_start_str,
+            "is_end": is_end_str,
+            "oos_end": oos_end_str,
+            "is_ann_pnl": is_ann_pnl,
+            "oos_ann_pnl": oos_ann_pnl,
+            "wfe": wfe,
+            "overfitted": is_overfitted
+        })
 
-            results.append({
-                'Window': window_idx,
-                'IS_Start': current_start.date(),
-                'IS_End': is_end.date(),
-                'OOS_Start': is_end.date(),
-                'OOS_End': oos_end.date(),
-                'IS_PnL': is_metrics['Total PnL'],
-                'IS_WinRate': is_metrics['Win Rate'],
-                'OOS_PnL': oos_metrics['Total PnL'],
-                'OOS_WinRate': oos_metrics['Win Rate'],
-                'WFE_Pct': wfe,
-                'Robust': is_robust
-            })
+        # Slide Window
+        current_start += timedelta(days=oos_window_months*30)
 
-            # Step forward by OOS months for the next window
-            current_start += pd.Timedelta(days=oos_days)
-            window_idx += 1
+    # Summarize Robustness
+    df_res = pd.DataFrame(results)
+    if not df_res.empty:
+        avg_wfe = df_res['wfe'].mean()
+        overfit_count = df_res['overfitted'].sum()
+        total_windows = len(df_res)
 
-        wfo_df = pd.DataFrame(results)
+        logger.info(f"WFO Özeti [{ticker}]: Ortalama WFE: %{avg_wfe:.2f} | Pencereler: {total_windows} | Ezberlenmiş: {overfit_count}/{total_windows}")
 
-        # Log Summary
-        if not wfo_df.empty:
-            robust_pct = (wfo_df['Robust'].sum() / len(wfo_df)) * 100
-            logger.info(f"WFO Complete for {ticker}. Overall Robustness: {robust_pct:.1f}%")
-            if robust_pct < 50.0:
-                logger.warning(f"{ticker} Strategy is highly overfitted. Failed WFO.")
+        if avg_wfe < 50 or overfit_count > (total_windows / 2):
+            logger.critical(f"STRATEJİ DAYANIKLILIK TESTİNDEN KALDI [{ticker}]. Parametreler Overfit (Ezber). Canlıya alınmamalıdır.")
+        else:
+            logger.info(f"STRATEJİ DAYANIKLILIK TESTİNİ GEÇTİ [{ticker}]. WFE skorları başarılı.")
 
-        return wfo_df
-
+    return results

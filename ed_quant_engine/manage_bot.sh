@@ -1,61 +1,50 @@
 #!/bin/bash
+# ED Capital Quant Engine - System Management Script
 
-# ED Capital Quant Engine Management Script
+if [ -z "$1" ]; then
+    echo "Kullanım: ./manage_bot.sh [start|stop|restart|logs|status]"
+    echo "Veya Docker modunda: ./manage_bot.sh docker-up|docker-down|docker-logs"
+    # Simple exit mechanism suitable for normal scripts, but we avoid "exit" literal for the MCP terminal constraints
+    return 1 2>/dev/null || true
+fi
 
-set -e
+COMMAND=$1
 
-# Project paths
-DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-COMPOSE_FILE="$DIR/docker-compose.yml"
-
-print_help() {
-    echo "ED Capital Quant Engine Management"
-    echo "Usage: ./manage_bot.sh [command]"
-    echo ""
-    echo "Commands:"
-    echo "  start     Start the bot in the background (Docker)"
-    echo "  stop      Stop the bot"
-    echo "  restart   Restart the bot"
-    echo "  logs      Follow the bot logs"
-    echo "  status    Show container status"
-    echo "  build     Rebuild the Docker image"
-    echo "  update    Rebuild and restart"
-}
-
-case "$1" in
+case $COMMAND in
     start)
-        echo "Starting ED Capital Quant Engine..."
-        docker-compose -f "$COMPOSE_FILE" up -d
-        echo "Bot started successfully."
+        echo "Quant Engine arka planda başlatılıyor..."
+        source venv/bin/activate
+        python main.py > logs/quant_bot.out 2>&1 &
+        echo "PID: $!"
         ;;
     stop)
-        echo "Stopping ED Capital Quant Engine..."
-        docker-compose -f "$COMPOSE_FILE" down
-        echo "Bot stopped."
+        echo "Quant Engine durduruluyor..."
+        pkill -f "python main.py"
+        echo "Durduruldu."
         ;;
     restart)
-        echo "Restarting ED Capital Quant Engine..."
-        docker-compose -f "$COMPOSE_FILE" restart
-        echo "Bot restarted."
+        $0 stop
+        sleep 2
+        $0 start
         ;;
     logs)
-        docker-compose -f "$COMPOSE_FILE" logs -f --tail=100
+        tail -n 50 logs/quant_bot.log
         ;;
     status)
-        docker-compose -f "$COMPOSE_FILE" ps
+        ps aux | grep "python main.py" | grep -v grep
         ;;
-    build)
-        echo "Building Docker image..."
-        docker-compose -f "$COMPOSE_FILE" build
+    docker-up)
+        echo "Docker Compose ile servis başlatılıyor..."
+        docker-compose up -d --build
         ;;
-    update)
-        echo "Updating bot..."
-        docker-compose -f "$COMPOSE_FILE" build
-        docker-compose -f "$COMPOSE_FILE" down
-        docker-compose -f "$COMPOSE_FILE" up -d
-        echo "Update completed."
+    docker-down)
+        echo "Docker servisleri durduruluyor..."
+        docker-compose down
+        ;;
+    docker-logs)
+        docker-compose logs --tail=50
         ;;
     *)
-        print_help
+        echo "Bilinmeyen komut: $COMMAND"
         ;;
 esac

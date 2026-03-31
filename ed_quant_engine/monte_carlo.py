@@ -1,63 +1,77 @@
-import pandas as pd
 import numpy as np
-from paper_db import PaperDB
-from logger import logger
+import pandas as pd
+import matplotlib.pyplot as plt
+from paper_db import get_closed_trades
+from logger import setup_logger
+import os
 
-class MonteCarloRisk:
-    """
-    Phase 22: Monte Carlo Risk Validation & Risk of Ruin.
-    Stress-tests the strategy using historical trades to simulate future worst-case scenarios.
-    Vectorized NumPy operations for ultra-fast performance.
-    """
+logger = setup_logger("MonteCarlo")
 
-    @classmethod
-    def run_simulation(cls, n_simulations: int = 10000, max_drawdown_limit: float = 0.50) -> dict:
-        """
-        Runs Monte Carlo simulations on historical trade PnLs.
-        Returns critical risk metrics: Expected Max Drawdown (99% CI) and Risk of Ruin.
-        """
-        rows = PaperDB.fetch_all("SELECT net_pnl FROM trades WHERE status = 'Closed' ORDER BY exit_time ASC")
+def run_monte_carlo_simulation(n_simulations: int = 10000) -> dict:
+    """Runs a Monte Carlo simulation (with replacement) on historical trade PnL percentages to assess Risk of Ruin."""
+    df = get_closed_trades()
+    if df.empty or len(df) < 50:
+        logger.warning("Monte Carlo için yeterli kapalı işlem (min 50) bulunamadı.")
+        return {}
 
-        if len(rows) < 30:
-            logger.warning("Not enough closed trades (min 30) for reliable Monte Carlo simulation.")
-            return {"99% CI Expected Max Drawdown": "N/A", "Risk of Ruin": "N/A"}
+    # Get sequence of returns (percentages)
+    returns = df['pnl_percent'] / 100.0
 
-        pnls = np.array([row['net_pnl'] for row in rows])
-        n_trades = len(pnls)
+    # We simulate starting with $1.0 and compounding
+    simulated_equity_curves = np.zeros((n_simulations, len(returns)))
 
-        logger.info(f"Running {n_simulations} Monte Carlo simulations on {n_trades} trades...")
+    # Fast Vectorized Approach
+    for i in range(n_simulations):
+        # Sample with replacement
+        simulated_returns = np.random.choice(returns, size=len(returns), replace=True)
+        # Calculate cumulative returns
+        simulated_equity_curves[i] = np.cumprod(1 + simulated_returns)
 
-        # 1. Vectorized Monte Carlo Simulation (Bootstrap sampling with replacement)
-        # Create a matrix of shape (n_simulations, n_trades)
-        simulated_returns_matrix = np.random.choice(pnls, size=(n_simulations, n_trades), replace=True)
+    # Calculate Max Drawdowns for each simulation
+    max_drawdowns = np.zeros(n_simulations)
+    for i in range(n_simulations):
+        curve = simulated_equity_curves[i]
+        peaks = np.maximum.accumulate(curve)
+        drawdowns = (curve - peaks) / peaks
+        max_drawdowns[i] = np.min(drawdowns) # Negative values
 
-        # 2. Calculate Equity Curves
-        start_bal = 10000.0 # Default assumption
-        cumulative_pnl = np.cumsum(simulated_returns_matrix, axis=1)
-        equity_curves = start_bal + cumulative_pnl
+    # Risk Metrics
+    # Expected Max Drawdown at 95% and 99% Confidence Intervals
+    # e.g., only 1% of simulations had a drawdown worse than X
+    var_95 = np.percentile(max_drawdowns, 5) # 5th percentile of negative numbers
+    var_99 = np.percentile(max_drawdowns, 1)
 
-        # 3. Calculate Drawdowns for each simulation
-        peak_equity = np.maximum.accumulate(equity_curves, axis=1)
-        drawdowns = (equity_curves - peak_equity) / peak_equity
-        max_drawdowns_per_sim = np.min(drawdowns, axis=1) * 100 # Convert to percentage
+    # Risk of Ruin (Probability of hitting a 50% drawdown)
+    ruin_threshold = -0.50
+    ruin_count = np.sum(max_drawdowns <= ruin_threshold)
+    risk_of_ruin_pct = (ruin_count / n_simulations) * 100
 
-        # 4. Critical Risk Metrics
-        expected_mdd_95 = np.percentile(max_drawdowns_per_sim, 5) # 5th percentile (most negative)
-        expected_mdd_99 = np.percentile(max_drawdowns_per_sim, 1) # 1st percentile
+    logger.info(f"Monte Carlo ({n_simulations} simülasyon): %99 Güvenle Max Drawdown: {var_99*100:.2f}% | İflas Riski: %{risk_of_ruin_pct:.2f}")
 
-        # Risk of Ruin: Percentage of simulations where Max Drawdown exceeded the limit (e.g. 50%)
-        ruin_limit_pct = -abs(max_drawdown_limit) * 100
-        ruined_sims = np.sum(max_drawdowns_per_sim <= ruin_limit_pct)
-        risk_of_ruin = (ruined_sims / n_simulations) * 100
+    if risk_of_ruin_pct > 1.0:
+        logger.critical(f"İFLAS RİSKİ YÜKSEK! Kasa büyüklüğü yönetimi (Kelly) agresif. (%{risk_of_ruin_pct:.2f})")
 
-        logger.info(f"Monte Carlo Risk Analysis Complete. Risk of Ruin: {risk_of_ruin:.2f}%, 99% Expected Max DD: {expected_mdd_99:.2f}%")
+    # Generate Chart (Spaghetti Plot)
+    plt.figure(figsize=(10, 5))
+    # Plot a subset to avoid crashing matplotlib (e.g., 100 curves)
+    subset_curves = simulated_equity_curves[:100]
+    for curve in subset_curves:
+        plt.plot(curve, color='blue', alpha=0.05)
 
-        if risk_of_ruin > 1.0:
-            logger.critical(f"WARNING: Risk of Ruin is {risk_of_ruin:.2f}% (> 1.0%). Strategy sizing is too aggressive! Reduce Kelly Fraction.")
+    plt.plot(np.median(simulated_equity_curves, axis=0), color='red', linewidth=2, label='Medyan Beklenti')
+    plt.title('Monte Carlo Simülasyonu (N=10,000)', fontsize=14)
+    plt.ylabel('Sermaye Çarpanı')
+    plt.xlabel('İşlem Sırası')
+    plt.legend()
 
-        return {
-            "95% CI Expected Max Drawdown": f"{expected_mdd_95:.2f}%",
-            "99% CI Expected Max Drawdown": f"{expected_mdd_99:.2f}%",
-            "Risk of Ruin": f"{risk_of_ruin:.2f}%"
-        }
+    chart_path = os.path.join("reports", "monte_carlo.png")
+    plt.tight_layout()
+    plt.savefig(chart_path)
+    plt.close()
 
+    return {
+        "var_95": var_95 * 100,
+        "var_99": var_99 * 100,
+        "risk_of_ruin": risk_of_ruin_pct,
+        "chart_path": chart_path
+    }
