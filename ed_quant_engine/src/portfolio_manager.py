@@ -1,96 +1,66 @@
 import pandas as pd
-import numpy as np
 from typing import Dict, List
-from .config import MAX_OPEN_POSITIONS, MAX_GLOBAL_RISK_PCT, CORRELATION_THRESHOLD
-from .logger import log_info, log_error, log_warning
+from src.logger import logger
+from src.paper_db import db
+from src.config import ALL_TICKERS
 
 class PortfolioManager:
-    """
-    ED Capital Risk Yönetimi:
-    1. Tüm açık işlemlerin maksimum riskini (Global Exposure) denetler.
-    2. Dinamik korelasyon hesaplayarak aynı anda aynı yönlü yüksek korelasyonlu işlemleri reddeder.
-    """
+    def __init__(self, max_open_trades: int = 4, max_risk_exposure: float = 0.06):
+        self.max_open_trades = max_open_trades
+        self.max_risk_exposure = max_risk_exposure
 
-    def __init__(self):
-        self.correlation_matrix = pd.DataFrame()
-        self.max_positions = MAX_OPEN_POSITIONS
-        self.max_risk_pct = MAX_GLOBAL_RISK_PCT
-        self.corr_threshold = CORRELATION_THRESHOLD
-
-    def update_correlation_matrix(self, universe_data: Dict[str, pd.DataFrame]):
+    def calculate_correlation_matrix(self, data: Dict[str, pd.DataFrame], window: int = 30) -> pd.DataFrame:
         """
-        Geçmiş 60 günlük kapanış verileri üzerinden yuvarlanan (rolling)
-        Pearson Korelasyon Matrisi oluşturur. (CPU/RAM dostu Pandas işlemi)
+        Calculates a rolling Pearson correlation matrix for the past `window` days using 'Close' prices.
         """
-        log_info("Dinamik Korelasyon Matrisi Güncelleniyor...")
-        try:
-            close_prices = {}
-            for ticker, data in universe_data.items():
-                df = data.get("1d")
-                if df is not None and not df.empty and "Close" in df.columns:
+        closes = pd.DataFrame({ticker: df['Close'] for ticker, df in data.items() if not df.empty})
+        if closes.empty:
+            return pd.DataFrame()
 
-                    # Sadece son 60 günlük kapanış fiyatları
-                    close_prices[ticker] = df['Close'].tail(60)
+        corr_matrix = closes.tail(window).corr()
+        return corr_matrix
 
-            df_closes = pd.DataFrame(close_prices)
-
-            # Günlük % Değişimler üzerinden korelasyon (Fiyatlar yanıltıcıdır)
-            returns = df_closes.pct_change().dropna()
-            self.correlation_matrix = returns.corr(method='pearson')
-            log_info(f"Matris {len(returns)} varlık için güncellendi.")
-
-        except Exception as e:
-            log_error(f"Korelasyon Matrisi Hatası: {e}")
-
-    def check_correlation_veto(self, new_ticker: str, new_direction: str, open_trades: List[dict]) -> bool:
+    def veto_correlation(self, new_ticker: str, new_direction: str, corr_matrix: pd.DataFrame, threshold: float = 0.75) -> bool:
         """
-        Eğer yeni sinyal gelen varlık, halihazırda AÇIK olan bir varlık ile
-        belirlenen eşik üzerinde (>0.75) pozitif korelasyonluysa ve yönleri aynıysa (Long-Long)
-        veya yüksek negatif korelasyonlu ve yönleri zıtsa (Long-Short) VETO atar.
+        Vetoes a trade if it's highly correlated with an existing open trade in the same direction.
         """
-        if self.correlation_matrix.empty or new_ticker not in self.correlation_matrix.columns:
+        if corr_matrix.empty or new_ticker not in corr_matrix.columns:
             return False
 
+        open_trades = db.get_open_trades()
         for trade in open_trades:
-            open_ticker = trade['ticker']
-            open_direction = trade['direction']
+            existing_ticker = trade['ticker']
+            existing_direction = trade['direction']
 
-            if open_ticker not in self.correlation_matrix.columns:
-                continue
+            if existing_ticker in corr_matrix.columns:
+                correlation = corr_matrix.loc[new_ticker, existing_ticker]
 
-            corr_value = self.correlation_matrix.loc[new_ticker, open_ticker]
+                # Risk Duplication Filter
+                if correlation > threshold and new_direction == existing_direction:
+                    logger.info(f"Correlation Veto: {new_ticker} ({new_direction}) is highly correlated ({correlation:.2f}) with open {existing_ticker} ({existing_direction}).")
+                    return True
 
-            # Risk Duplication: Altın Long varken Gümüş Long geldiğinde (Korelasyon > 0.75)
-            if corr_value > self.corr_threshold and new_direction == open_direction:
-                log_warning(f"🚨 KORELASYON VETOSU: {new_ticker} ({new_direction}) sinyali, {open_ticker} ({open_direction}) ile çok benzer hareket ediyor (Korelasyon: {corr_value:.2f}).")
-                return True
-
-            # Ters Korelasyonlu Varlıkta Zıt İşlem: USDTRY Long varken EURUSD Short geldiğinde (-0.80 ise)
-            if corr_value < -self.corr_threshold and new_direction != open_direction:
-                log_warning(f"🚨 KORELASYON VETOSU: {new_ticker} ({new_direction}) sinyali, {open_ticker} ({open_direction}) ile ters korelasyonlu ({corr_value:.2f}). Risk katlanıyor!")
-                return True
-
+                # Counter-directional Hedge Risk (optional implementation)
+                if correlation < -threshold and new_direction == existing_direction:
+                     logger.info(f"Correlation Veto: {new_ticker} ({new_direction}) is highly negatively correlated ({correlation:.2f}) with open {existing_ticker} ({existing_direction}).")
+                     return True
         return False
 
-    def check_exposure_limit(self, current_balance: float, new_risk_amount: float, open_trades: List[dict]) -> bool:
+    def veto_global_limits(self, capital: float, current_risk_pct: float) -> bool:
         """
-        Açık işlemlerin toplam riskinin, Kasanın Maksimum Yüzdesini (Örn %6)
-        geçip geçmediğini ve pozisyon sayısı sınırını denetler.
+        Vetoes a trade if max open trades or global risk limits are reached.
         """
-        if len(open_trades) >= self.max_positions:
-            log_warning(f"🚨 KAPASİTE DOLU VETOSU: Maksimum açık pozisyon sınırına ({self.max_positions}) ulaşıldı.")
+        open_trades = db.get_open_trades()
+
+        if len(open_trades) >= self.max_open_trades:
+            logger.info(f"Global Limit Veto: Max open trades ({self.max_open_trades}) reached.")
             return True
 
-        total_current_risk = sum(
-            abs(t['entry_price'] - t['sl_price']) * t['position_size']
-            for t in open_trades
-        )
+        # Simplified risk calculation (assuming 2% risk per trade currently)
+        total_current_risk = sum([float(trade['position_size']) for trade in open_trades]) / capital # Approximated %
 
-        projected_total_risk = total_current_risk + new_risk_amount
-        max_allowed_risk = current_balance * self.max_risk_pct
-
-        if projected_total_risk > max_allowed_risk:
-            log_warning(f"🚨 GLOBAL RİSK VETOSU: Yeni işlemle risk ({projected_total_risk:.2f}$) limiti ({max_allowed_risk:.2f}$) aşıyor.")
-            return True
+        if total_current_risk + current_risk_pct > self.max_risk_exposure:
+             logger.info(f"Global Limit Veto: Max risk exposure ({self.max_risk_exposure*100}%) reached.")
+             return True
 
         return False

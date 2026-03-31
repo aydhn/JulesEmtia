@@ -1,113 +1,131 @@
 import pandas as pd
 import numpy as np
-from typing import List, Dict
-from .logger import log_info, log_error
+from src.features import add_features
+from src.strategy import Strategy
+from src.data_loader import DataLoader
+import asyncio
+from typing import Dict, List, Tuple
+from src.logger import logger
+from concurrent.futures import ProcessPoolExecutor
 
-def run_vectorized_backtest(df: pd.DataFrame, direction: str, sl_multiplier: float = 1.5, tp_multiplier: float = 3.0, slippage_pct: float = 0.001) -> dict:
-    """
-    Sıfır Bütçeli (Harici Kütüphanesiz) Vektörel (Pandas Shift tabanlı) Backtest Motoru.
-    Geleceği görmeyi engeller (Lookahead Bias korumalıdır).
-    İşlemlere kayma (Slippage %0.1 varsayılan) ekler.
-    """
-    if len(df) < 100:
-        return {"Trades": 0, "WinRate": 0, "ProfitFactor": 0, "NetPnL": 0}
+class Backtester:
+    def __init__(self, data: Dict[str, pd.DataFrame]):
+        self.data = {k: add_features(v) for k, v in data.items() if not v.empty}
+        self.strategy = Strategy()
+        self.slippage = 0.001 # 0.1% slippage
+        self.commission = 0.0005 # 0.05% commission
 
-    df = df.copy()
+    def run_backtest(self, ticker: str, df: pd.DataFrame) -> List[Dict]:
+        """
+        Runs a vectorized/iterative backtest for a single ticker with slippage & commission.
+        """
+        trades = []
+        open_trade = None
 
-    # 1. Sinyal Üretimi (Vektörel)
-    df['Signal'] = 0
-    if direction == "Long":
-        df.loc[(df['Close'] > df['EMA_50']) & (df['RSI_14'] < 30) & (df['MACD_12_26_9'] > 0), 'Signal'] = 1
-    elif direction == "Short":
-        df.loc[(df['Close'] < df['EMA_50']) & (df['RSI_14'] > 70) & (df['MACD_12_26_9'] < 0), 'Signal'] = -1
+        for i in range(1, len(df)):
+            current_row = df.iloc[i]
+            prev_row = df.iloc[i-1]
 
-    # İşleme Sinyalin geldiği ERTESİ mumda girilir (Shift 1)
-    df['Position'] = df['Signal'].shift(1)
+            # Simplified backtest generation logic (not full vectorized for state handling complexity)
+            signal_data = self.strategy.generate_signal(ticker, df.iloc[:i])
 
-    trades = []
-    in_position = False
-    entry_price = 0
-    sl = 0
-    tp = 0
+            if open_trade:
+                # Check for exit (Hit SL or TP)
+                current_price = current_row['Close']
+                if open_trade['direction'] == 'Long':
+                    if current_row['Low'] <= open_trade['sl_price']:
+                        exit_price = open_trade['sl_price'] * (1 - self.slippage) # Slippage down on SL
+                        open_trade['exit_price'] = exit_price
+                        open_trade['exit_time'] = current_row.name
+                        open_trade['pnl'] = (exit_price - open_trade['entry_price']) / open_trade['entry_price'] - self.commission
+                        trades.append(open_trade)
+                        open_trade = None
+                    elif current_row['High'] >= open_trade['tp_price']:
+                        exit_price = open_trade['tp_price'] * (1 - self.slippage) # Slippage down on TP
+                        open_trade['exit_price'] = exit_price
+                        open_trade['exit_time'] = current_row.name
+                        open_trade['pnl'] = (exit_price - open_trade['entry_price']) / open_trade['entry_price'] - self.commission
+                        trades.append(open_trade)
+                        open_trade = None
+                else: # Short
+                    if current_row['High'] >= open_trade['sl_price']:
+                        exit_price = open_trade['sl_price'] * (1 + self.slippage) # Slippage up on SL
+                        open_trade['exit_price'] = exit_price
+                        open_trade['exit_time'] = current_row.name
+                        open_trade['pnl'] = (open_trade['entry_price'] - exit_price) / open_trade['entry_price'] - self.commission
+                        trades.append(open_trade)
+                        open_trade = None
+                    elif current_row['Low'] <= open_trade['tp_price']:
+                        exit_price = open_trade['tp_price'] * (1 + self.slippage) # Slippage up on TP
+                        open_trade['exit_price'] = exit_price
+                        open_trade['exit_time'] = current_row.name
+                        open_trade['pnl'] = (open_trade['entry_price'] - exit_price) / open_trade['entry_price'] - self.commission
+                        trades.append(open_trade)
+                        open_trade = None
 
-    # Not: Tam vektörel SL/TP takibi pandas'da zordur, bu yüzden sinyalleri
-    # vektörel bulup, çıkışları iteratif yapıyoruz. (Hız için iterrows yerine apply/itertuples)
-    for row in df.itertuples():
-        if not in_position and row.Position != 0:
-            # İşleme Giriş (Slippage Dahil)
-            in_position = True
-            if row.Position == 1: # Long
-                entry_price = row.Open * (1 + slippage_pct)
-                sl = entry_price - (sl_multiplier * row.ATRr_14)
-                tp = entry_price + (tp_multiplier * row.ATRr_14)
-            else: # Short
-                entry_price = row.Open * (1 - slippage_pct)
-                sl = entry_price + (sl_multiplier * row.ATRr_14)
-                tp = entry_price - (tp_multiplier * row.ATRr_14)
+            elif signal_data: # Enter Trade
+                entry_price = current_row['Open'] # Execute at open of next bar
 
-            entry_time = row.Index
-            continue
+                # Apply slippage & commission to entry
+                if signal_data['direction'] == 'Long':
+                    entry_price *= (1 + self.slippage)
+                else:
+                    entry_price *= (1 - self.slippage)
 
-        if in_position:
-            # Çıkış Kontrolü (Aynı mumda SL ve TP patlarsa en kötü senaryoyu, yani SL'yi kabul et - Quant Kuralı)
-            hit_sl = False
-            hit_tp = False
-            exit_price = 0
+                open_trade = {
+                    'ticker': ticker,
+                    'direction': signal_data['direction'],
+                    'entry_time': current_row.name,
+                    'entry_price': entry_price,
+                    'sl_price': signal_data['sl_price'],
+                    'tp_price': signal_data['tp_price'],
+                    'position_size': signal_data['position_size']
+                }
 
-            if row.Position == 1: # Long
-                if row.Low <= sl: hit_sl = True
-                if row.High >= tp: hit_tp = True
-            else: # Short
-                if row.High >= sl: hit_sl = True
-                if row.Low <= tp: hit_tp = True
+        return trades
 
-            if hit_sl and hit_tp:
-                hit_tp = False # Aynı mumda ikisi de değdiyse Zarar yaz (Conservative Approach)
+    def evaluate_performance(self, trades: List[Dict]) -> Dict:
+        if not trades:
+            return {}
 
-            if hit_sl:
-                exit_price = sl * (1 - slippage_pct) if row.Position == 1 else sl * (1 + slippage_pct)
-            elif hit_tp:
-                exit_price = tp * (1 - slippage_pct) if row.Position == 1 else tp * (1 + slippage_pct)
+        df = pd.DataFrame(trades)
+        wins = df[df['pnl'] > 0]
+        losses = df[df['pnl'] <= 0]
 
-            if hit_sl or hit_tp:
-                # İşlem Kapandı
-                pnl = (exit_price - entry_price) / entry_price if row.Position == 1 else (entry_price - exit_price) / entry_price
-                trades.append({
-                    "EntryTime": entry_time,
-                    "ExitTime": row.Index,
-                    "EntryPrice": entry_price,
-                    "ExitPrice": exit_price,
-                    "PnL_Pct": pnl * 100, # Yüzde
-                    "Result": "Win" if pnl > 0 else "Loss"
-                })
-                in_position = False
+        win_rate = len(wins) / len(df) if len(df) > 0 else 0
+        profit_factor = abs(wins['pnl'].sum() / losses['pnl'].sum()) if len(losses) > 0 and losses['pnl'].sum() != 0 else float('inf')
 
-    # 2. Raporlama Metrikleri (Tear Sheet Verileri)
-    if not trades:
-        return {"Trades": 0, "WinRate": 0, "ProfitFactor": 0, "NetPnL": 0}
+        # Max Drawdown estimation from cumulative PnL
+        cumulative_pnl = (1 + df['pnl']).cumprod()
+        rolling_max = cumulative_pnl.cummax()
+        drawdown = (cumulative_pnl - rolling_max) / rolling_max
+        max_drawdown = drawdown.min()
 
-    df_trades = pd.DataFrame(trades)
-    wins = df_trades[df_trades['Result'] == 'Win']
-    losses = df_trades[df_trades['Result'] == 'Loss']
+        return {
+            "total_trades": len(df),
+            "win_rate": win_rate,
+            "profit_factor": profit_factor,
+            "max_drawdown": max_drawdown,
+            "total_pnl": df['pnl'].sum()
+        }
 
-    win_rate = len(wins) / len(df_trades) if len(df_trades) > 0 else 0
+    def optimize_parameters(self, params_grid: List[Dict]) -> pd.DataFrame:
+        """
+        CPU-friendly grid search.
+        """
+        logger.info("Starting optimization (CPU friendly).")
+        results = []
+        for params in params_grid:
+            self.strategy.atr_sl_multiplier = params['sl']
+            self.strategy.atr_tp_multiplier = params['tp']
 
-    gross_profit = wins['PnL_Pct'].sum() if not wins.empty else 0
-    gross_loss = abs(losses['PnL_Pct'].sum()) if not losses.empty else 1 # Sıfıra bölme hatası önlemi
+            all_trades = []
+            for ticker, df in self.data.items():
+                trades = self.run_backtest(ticker, df)
+                all_trades.extend(trades)
 
-    profit_factor = gross_profit / gross_loss
-    net_pnl = df_trades['PnL_Pct'].sum()
+            perf = self.evaluate_performance(all_trades)
+            if perf:
+                results.append({**params, **perf})
 
-    # Max Drawdown (Kümülatif Getiri üzerinden)
-    df_trades['CumPnL'] = df_trades['PnL_Pct'].cumsum()
-    df_trades['Peak'] = df_trades['CumPnL'].cummax()
-    df_trades['Drawdown'] = df_trades['Peak'] - df_trades['CumPnL']
-    max_dd = df_trades['Drawdown'].max()
-
-    return {
-        "Trades": len(df_trades),
-        "WinRate": win_rate * 100,
-        "ProfitFactor": profit_factor,
-        "NetPnL": net_pnl,
-        "MaxDrawdown": max_dd
-    }
+        return pd.DataFrame(results).sort_values(by="win_rate", ascending=False)

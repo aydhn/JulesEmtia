@@ -1,93 +1,127 @@
 import pandas as pd
 import numpy as np
-import os
-import joblib
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from .config import MODEL_DIR, ML_CONFIDENCE_THRESHOLD
-from .logger import log_info, log_error, log_warning
+from src.features import add_features
+from src.data_loader import DataLoader
+from src.config import MODELS_PATH
+import joblib
+import os
+from src.logger import logger
 
-def create_labels(df: pd.DataFrame, target_return: float = 0.02, stop_loss: float = 0.01, window: int = 10) -> pd.DataFrame:
-    """
-    Hedef Etiket (Label) oluşturur. Bir mum sonrasında fiyat, stop_loss'a çarpmadan
-    target_return hedefine N mum (window) içinde ulaşmışsa başarılı (1), aksi halde (0).
-    Lookahead Bias olmaması için geleceğe bakan '.shift(-n)' kullanılır.
-    Bu veriler sadece EĞİTİM için kullanılır, SİNYAL ÜRETİMİNDE KULLANILMAZ.
-    """
-    df = df.copy()
+class MLValidator:
+    def __init__(self, model_filename: str = "rf_model.pkl", threshold: float = 0.60):
+        self.model_path = os.path.join(MODELS_PATH, model_filename)
+        self.threshold = threshold
+        self.model = None
+        self._load_model()
 
-    # İleriye dönük maksimum getiri ve maksimum düşüşü hesapla
-    future_high = df['High'].rolling(window=window).max().shift(-window)
-    future_low = df['Low'].rolling(window=window).min().shift(-window)
+    def _load_model(self):
+        try:
+            if os.path.exists(self.model_path):
+                self.model = joblib.load(self.model_path)
+                logger.info(f"Loaded ML model from {self.model_path}")
+            else:
+                logger.warning("No ML model found. It needs to be trained.")
+        except Exception as e:
+            logger.error(f"Error loading ML model: {e}")
 
-    # 1: Başarılı Trade (TP'ye değdi ve öncesinde SL'ye değmedi)
-    # Basit bir simülasyon
-    df['Label'] = np.where(
-        (future_high > df['Close'] * (1 + target_return)) &
-        (future_low > df['Close'] * (1 - stop_loss)),
-        1, 0
-    )
+    def create_labels(self, df: pd.DataFrame, lookforward: int = 5, profit_target: float = 0.01) -> pd.DataFrame:
+        """
+        Creates binary labels (1=Success, 0=Failure) based on future returns.
+        Avoids lookahead bias by shifting returns backwards.
+        """
+        # Feature Engineering columns assumed present
+        # Target: Did the price go up by 'profit_target' % in the next 'lookforward' bars?
+        df['Target'] = (df['Close'].shift(-lookforward) / df['Close'] - 1) > profit_target
+        df['Target'] = df['Target'].astype(int)
 
-    # NaN olan son window kadar satırı sil (Geleceği bilemeyiz)
-    df.dropna(subset=['Label'], inplace=True)
-    return df
+        # Drop NaN targets (the last 'lookforward' bars)
+        df = df.dropna(subset=['Target'])
+        return df
 
-def train_and_save_model(ticker: str, df: pd.DataFrame):
-    """
-    Yerel (Local CPU) bir Makine Öğrenmesi (Random Forest) modeli eğitir ve
-    modeller klasörüne kaydeder. Otonom olarak hafta sonları çalıştırılabilir.
-    """
-    log_info(f"[{ticker}] Makine Öğrenmesi Modeli Eğitiliyor...")
+    def prepare_data(self, df: pd.DataFrame) -> tuple:
+        """
+        Prepares X (features) and y (target) for training.
+        """
+        df = self.create_labels(df.copy())
 
-    # Özellikler (Features - X)
-    features = [c for c in df.columns if 'HTF_' in c or c in ['RSI_14', 'MACD_12_26_9', 'Returns', 'BBL_20_2.0', 'BBU_20_2.0', 'ATRr_14']]
+        # Select Features (Ensure no future data is here!)
+        features = ['EMA_50', 'EMA_200', 'RSI_14', 'MACD', 'MACD_Hist', 'ATR_14', 'Log_Return']
 
-    df_labeled = create_labels(df)
+        # Keep only rows where all features are available
+        df = df.dropna(subset=features)
 
-    if len(df_labeled) < 500: # Veri yetersiz
-        log_warning(f"[{ticker}] Yetersiz veri ({len(df_labeled)} satır), model eğitilmedi.")
-        return
+        X = df[features]
+        y = df['Target']
+        return X, y
 
-    X = df_labeled[features].dropna()
-    y = df_labeled.loc[X.index, 'Label']
+    def train_model(self, data: dict):
+        """
+        Trains the RandomForestClassifier using historical data from multiple tickers.
+        """
+        logger.info("Starting ML model training...")
+        all_X = []
+        all_y = []
 
-    # Train-Test Split (Sıralı olmalı, zaman serisi karıştırılamaz)
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+        for ticker, df in data.items():
+            if df.empty or len(df) < 200: continue
+            df = add_features(df.copy())
+            X, y = self.prepare_data(df)
+            if not X.empty:
+                all_X.append(X)
+                all_y.append(y)
 
-    model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
-    model.fit(X_train, y_train)
+        if not all_X:
+            logger.warning("No valid data to train ML model.")
+            return
 
-    accuracy = model.score(X_test, y_test)
-    log_info(f"[{ticker}] Model Eğitildi. Doğruluk (Accuracy): {accuracy:.2f}")
+        X_combined = pd.concat(all_X)
+        y_combined = pd.concat(all_y)
 
-    # Kaydet
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    joblib.dump(model, os.path.join(MODEL_DIR, f"{ticker}_rf_model.pkl"))
+        # Train/Test Split (Time-series aware split is better, but this is a simplified example)
+        # Using a standard split for now to keep CPU usage low. In production, use TimeSeriesSplit.
+        X_train, X_test, y_train, y_test = train_test_split(X_combined, y_combined, test_size=0.2, shuffle=False)
 
-def check_ml_veto(ticker: str, current_features: pd.Series) -> bool:
-    """
-    Sinyal geldiğinde, makine öğrenmesi modelinden tahmin alır.
-    Eğer başarı ihtimali belirlenen eşiğin (örn %60) altındaysa sinyali reddeder (Veto).
-    """
-    model_path = os.path.join(MODEL_DIR, f"{ticker}_rf_model.pkl")
-    if not os.path.exists(model_path):
-        log_warning(f"[{ticker}] ML Modeli bulunamadı, Veto Atlandı.")
-        return False
+        # RandomForest parameters tuned for speed/avoiding overfitting
+        clf = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=-1)
+        clf.fit(X_train, y_train)
 
-    model = joblib.load(model_path)
+        # Evaluate (Optional)
+        score = clf.score(X_test, y_test)
+        logger.info(f"ML Model trained. Test Accuracy: {score:.2f}")
 
-    # İlgili özellikleri seç
-    feature_names = model.feature_names_in_
-    try:
-        X = current_features[feature_names].to_frame().T
-        prob = model.predict_proba(X)[0][1] # Sınıf 1 (Başarı) ihtimali
+        # Save model
+        joblib.dump(clf, self.model_path)
+        self.model = clf
+        logger.info(f"Model saved to {self.model_path}")
 
-        if prob < ML_CONFIDENCE_THRESHOLD:
-            log_warning(f"🚨 ML VETOSU: [{ticker}] Başarı İhtimali %{prob*100:.1f} (Eşik: %{ML_CONFIDENCE_THRESHOLD*100}). Sinyal Reddedildi.")
-            return True
-        else:
-            log_info(f"✅ ML ONAYI: [{ticker}] Başarı İhtimali %{prob*100:.1f} ile onaylandı.")
-            return False
-    except Exception as e:
-        log_error(f"[{ticker}] ML Tahmin Hatası: {e}")
-        return False
+    def validate_signal(self, current_features: dict) -> bool:
+        """
+        Predicts the probability of success for a given set of features.
+        Returns True if probability >= threshold.
+        """
+        if self.model is None:
+            logger.warning("ML Model not loaded. Skipping ML validation (returning True).")
+            return True # Fail-open if no model
+
+        # Ensure features are in the correct order
+        feature_cols = ['EMA_50', 'EMA_200', 'RSI_14', 'MACD', 'MACD_Hist', 'ATR_14', 'Log_Return']
+        try:
+            # Create a 2D array (1 sample, n features)
+            X_input = np.array([current_features[col] for col in feature_cols]).reshape(1, -1)
+
+            # predict_proba returns [[prob_class_0, prob_class_1]]
+            prob_success = self.model.predict_proba(X_input)[0][1]
+
+            if prob_success >= self.threshold:
+                logger.info(f"ML Validation Passed (Prob: {prob_success:.2f})")
+                return True
+            else:
+                 logger.info(f"ML Veto: Rejected signal (Prob: {prob_success:.2f} < {self.threshold})")
+                 return False
+
+        except Exception as e:
+            logger.error(f"Error during ML validation: {e}. Passing signal.")
+            return True # Fail-open on error
+

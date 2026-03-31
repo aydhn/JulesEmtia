@@ -1,62 +1,80 @@
-import numpy as np
 import pandas as pd
-from typing import Dict, Any, Tuple
-from .config import SPREADS
-from .logger import log_info, log_error, log_warning
+from typing import Dict
+from src.logger import logger
 
-def calculate_dynamic_slippage(ticker: str, atr: float, avg_atr: float, base_spread: float) -> float:
-    """
-    Volatiliteye (ATR) bağlı dinamik kayma maliyeti (Slippage) hesaplar.
-    O anki ATR, ortalamadan ne kadar yüksekse kayma o kadar artar.
-    """
-    if np.isnan(atr) or np.isnan(avg_atr) or avg_atr == 0:
-        return base_spread / 2
+class ExecutionModel:
+    def __init__(self):
+        # Base spreads per asset class (in percentage or absolute, here using percentage approximation)
+        self.base_spreads = {
+            "METALS": 0.0002,   # 0.02%
+            "ENERGY": 0.0003,   # 0.03%
+            "AGRI": 0.0005,     # 0.05%
+            "FOREX_TRY": 0.0010 # 0.10%
+        }
 
-    volatility_ratio = atr / avg_atr
+    def _get_category(self, ticker: str) -> str:
+        # Import inside to avoid circular deps if TICKERS is used elsewhere
+        from src.config import TICKERS
+        for category, tickers in TICKERS.items():
+            if ticker in tickers:
+                return category
+        return "UNKNOWN"
 
-    # Eğer volatilite normalse (oran 1 civarıysa), standart kayma uygula
-    if volatility_ratio <= 1.2:
-        slippage = base_spread / 2
-    else:
-        # Volatilite patladıysa (Örn 1.5 katıysa), kaymayı (1.5)^2 oranında artır
-        slippage = (base_spread / 2) * (volatility_ratio ** 2)
-        log_warning(f"🚨 YÜKSEK VOLATİLİTE KAYMASI: [{ticker}] ATR Oranı: {volatility_ratio:.2f}, Kayma Maliyeti: {slippage:.5f}")
+    def calculate_slippage(self, ticker: str, current_price: float, current_atr: float, avg_atr: float) -> float:
+        """
+        Calculates dynamic slippage based on volatility (ATR).
+        If current ATR > avg ATR, increase slippage.
+        """
+        category = self._get_category(ticker)
+        base_spread = self.base_spreads.get(category, 0.0005) # Default 0.05%
 
-    return slippage
+        # Volatility multiplier
+        volatility_ratio = current_atr / avg_atr if avg_atr > 0 else 1.0
 
-def get_base_spread(ticker: str) -> float:
-    """
-    Varlığın kategorisine göre sabit baz spread (Alış-Satış Makası) yüzdesini döndürür.
-    """
-    if "TRY" in ticker:
-        return SPREADS["Forex_TRY"]
-    elif ticker in ["GC=F", "SI=F", "HG=F", "PA=F", "PL=F"]:
-        return SPREADS["Metals"]
-    elif ticker in ["CL=F", "BZ=F", "NG=F", "HO=F", "RB=F"]:
-        return SPREADS["Energy"]
-    else:
-        return SPREADS["Agriculture"]
+        # If volatility is 50% higher than average, double the slippage
+        if volatility_ratio > 1.5:
+             multiplier = 2.0
+             logger.debug(f"High Volatility ({volatility_ratio:.2f}x) detected for {ticker}. Doubling slippage.")
+        else:
+             multiplier = 1.0
 
-def apply_execution_costs(ticker: str, direction: str, market_price: float, atr: float, avg_atr: float) -> Tuple[float, float, float]:
-    """
-    Sinyal geldiğinde (Giriş) ve işlem kapanırken (Çıkış) kusursuz fiyattan işlemi gerçekleştirmez.
-    Makas (Spread) ve Kayma (Slippage) maliyetlerini ekleyerek GERÇEK (Net of Fees) fiyatı hesaplar.
-    """
-    base_spread_pct = get_base_spread(ticker)
-    base_spread_abs = market_price * base_spread_pct
+        # Dynamic slippage cost in price terms
+        dynamic_spread = base_spread * multiplier
+        slippage_cost = current_price * dynamic_spread
 
-    dynamic_slippage_abs = market_price * calculate_dynamic_slippage(ticker, atr, avg_atr, base_spread_pct)
+        return slippage_cost
 
-    # Giriş Maliyeti
-    if direction == "Long":
-        entry_price = market_price + (base_spread_abs / 2) + dynamic_slippage_abs
-        # Çıkış maliyeti önizlemesi (Spread kadar daha zarar yazacak)
-        exit_price_preview = market_price - (base_spread_abs / 2) - dynamic_slippage_abs
-    else:
-        entry_price = market_price - (base_spread_abs / 2) - dynamic_slippage_abs
-        exit_price_preview = market_price + (base_spread_abs / 2) + dynamic_slippage_abs
+    def apply_entry_costs(self, ticker: str, direction: str, market_price: float, current_atr: float, avg_atr: float) -> float:
+        """
+        Returns the realistic entry price (worse than market price).
+        """
+        slippage = self.calculate_slippage(ticker, market_price, current_atr, avg_atr)
+        category = self._get_category(ticker)
+        base_spread = self.base_spreads.get(category, 0.0005)
 
-    total_cost_pct = abs((entry_price - market_price) / market_price) + abs((exit_price_preview - market_price) / market_price)
-    log_info(f"[{ticker}] Gerçekçi İletim Maliyeti (Slippage+Spread): %{total_cost_pct*100:.4f}")
+        spread_cost = market_price * (base_spread / 2) # Half spread for one side
 
-    return entry_price, dynamic_slippage_abs, base_spread_abs
+        if direction == "Long":
+            return market_price + spread_cost + slippage
+        elif direction == "Short":
+            return market_price - spread_cost - slippage
+        return market_price
+
+    def apply_exit_costs(self, ticker: str, direction: str, exit_price: float, current_atr: float, avg_atr: float) -> float:
+        """
+        Returns realistic exit price.
+        """
+        slippage = self.calculate_slippage(ticker, exit_price, current_atr, avg_atr)
+        category = self._get_category(ticker)
+        base_spread = self.base_spreads.get(category, 0.0005)
+
+        spread_cost = exit_price * (base_spread / 2)
+
+        # Exiting a Long means Selling
+        if direction == "Long":
+             return exit_price - spread_cost - slippage
+        # Exiting a Short means Buying
+        elif direction == "Short":
+             return exit_price + spread_cost + slippage
+        return exit_price
+
