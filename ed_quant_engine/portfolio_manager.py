@@ -1,87 +1,88 @@
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Any
+from typing import Dict
 from paper_db import get_open_positions
 from logger import setup_logger
 
 logger = setup_logger("PortfolioManager")
 
-def calculate_correlation_matrix(prices_dict: Dict[str, pd.Series], window: int = 60) -> pd.DataFrame:
-    """Calculates rolling Pearson correlation matrix for dynamic risk exposure limits."""
-    df = pd.DataFrame(prices_dict).pct_change().rolling(window=window).corr()
-    return df.iloc[-len(prices_dict):] # Return just the latest matrix slice
+def calculate_correlation_matrix(prices_dict: Dict[str, pd.Series]) -> pd.DataFrame:
+    """Phase 11: Calculates a rolling Pearson Correlation Matrix for the universe."""
+    df = pd.DataFrame(prices_dict)
+    # Ensure all series have the same length
+    df.dropna(inplace=True)
+    return df.corr(method='pearson')
 
-def check_correlation_veto(ticker: str, direction: str, current_matrix: pd.DataFrame, threshold: float = 0.75) -> bool:
-    """Blocks a signal if we already hold a position in a highly correlated asset in the same direction."""
-    open_positions = get_open_positions()
-    if not open_positions:
-        return False # No veto needed if we have no positions
-
-    try:
-        corrs = current_matrix.loc[ticker]
-        for pos in open_positions:
-            pos_ticker = pos['ticker']
-            pos_direction = pos['direction']
-
-            if pos_ticker == ticker:
-                continue
-
-            corr_value = corrs.get(pos_ticker, 0.0)
-
-            # High positive correlation + Same Direction = Double Exposure (Risk Duplication)
-            if corr_value > threshold and direction == pos_direction:
-                logger.warning(f"Korelasyon Vetosu: {ticker} ({direction}) reddedildi! {pos_ticker} ({pos_direction}) ile {corr_value:.2f} korelasyona sahip.")
-                return True # VETO
-
-            # High negative correlation + Opposite Direction = Double Exposure
-            elif corr_value < -threshold and direction != pos_direction:
-                logger.warning(f"Ters Korelasyon Vetosu: {ticker} ({direction}) reddedildi! {pos_ticker} ({pos_direction}) ile {corr_value:.2f} ters korelasyona sahip.")
-                return True # VETO
-
-        return False # All clear
-    except Exception as e:
-        logger.error(f"Korelasyon veto hatası: {str(e)}")
+def check_correlation_veto(new_ticker: str, direction: str, corr_matrix: pd.DataFrame, threshold: float = 0.75) -> bool:
+    """
+    Vetoes a signal if an existing open position is highly correlated and in the same direction.
+    """
+    if new_ticker not in corr_matrix.columns:
         return False
 
-def check_global_exposure(max_positions: int = 3) -> bool:
-    """Ensures we don't over-commit our capital. Blocks signal if portfolio is full."""
-    open_count = len(get_open_positions())
-    if open_count >= max_positions:
-        logger.warning(f"Kapasite Dolu: {open_count}/{max_positions} pozisyon açık. Yeni sinyal reddedildi.")
-        return True # VETO
+    open_positions = get_open_positions()
+    for pos in open_positions:
+        open_ticker = pos['ticker']
+        open_direction = pos['direction']
+
+        if open_ticker in corr_matrix.columns:
+            corr_value = corr_matrix.loc[new_ticker, open_ticker]
+            if corr_value > threshold and direction == open_direction:
+                logger.warning(f"Korelasyon Vetosu: {new_ticker} ({direction}), {open_ticker} ile çok benzer (Korelasyon: {corr_value:.2f}). Riski katlamamak için reddedildi.")
+                return True
+            # Inverse correlation check (e.g. going Long on X and Long on strongly negative correlated Y)
+            elif corr_value < -threshold and direction != open_direction:
+                logger.warning(f"Ters Korelasyon Vetosu: {new_ticker} ({direction}), {open_ticker} ({open_direction}) ile zıt (Korelasyon: {corr_value:.2f}).")
+                return True
+
     return False
 
-def calculate_kelly_position_size(ticker: str, entry: float, stop_loss: float, balance: float, win_rate: float, avg_win: float, avg_loss: float, cap_pct: float = 0.04) -> float:
-    """Calculates position size using the Kelly Criterion, bounded by a Fractional Safety Net and absolute hard cap."""
-    if avg_loss == 0 or win_rate == 0:
-        return balance * 0.01 / abs(entry - stop_loss) # Fallback to flat 1% risk if no history
+def check_global_exposure(max_positions: int = 3, max_exposure_pct: float = 0.06) -> bool:
+    """Checks if the portfolio has reached its maximum global limits."""
+    open_positions = get_open_positions()
+    if len(open_positions) >= max_positions:
+        logger.warning(f"Global Limit Dolu: Maksimum pozisyon sayısına ({max_positions}) ulaşıldı.")
+        return True
+    return False
 
-    loss_rate = 1.0 - win_rate
-    profit_factor = abs(avg_win / avg_loss)
+def calculate_kelly_position_size(ticker: str, entry: float, stop_loss: float, balance: float, win_rate: float, avg_win: float, avg_loss: float) -> float:
+    """
+    Phase 15: Uses Fractional Kelly Criterion to size the position.
+    Formulas:
+    b = avg_win / avg_loss
+    p = win_rate
+    q = 1 - p
+    kelly = (bp - q) / b
+    fractional = kelly / 2
+    """
+    if avg_loss == 0: avg_loss = 1.0 # Prevent division by zero
 
-    # Basic Kelly Formula: f = (bp - q) / b
-    kelly_fraction = ((profit_factor * win_rate) - loss_rate) / profit_factor
+    b = avg_win / avg_loss
+    p = win_rate
+    q = 1.0 - p
 
-    if kelly_fraction <= 0:
-        logger.warning(f"Negatif Kelly ({kelly_fraction:.2f}) - Strateji avantajını kaybetmiş. İşlem reddedilmeli veya asgari risk uygulanmalı.")
-        # We enforce a tiny fixed risk just to keep gathering data, or we could return 0 to veto completely.
-        kelly_fraction = 0.005 # 0.5% fallback
+    if b <= 0: return 0.0
 
-    # JP Morgan Safety Buffer: Half-Kelly or Quarter-Kelly (from .env, usually 0.5)
-    import os
-    fraction_multiplier = float(os.getenv("KELLY_FRACTION", "0.5"))
-    adjusted_kelly = kelly_fraction * fraction_multiplier
+    kelly_pct = (b * p - q) / b
 
-    # Hard Cap Protection (e.g., max 4% of bankroll per trade)
-    final_risk_pct = min(adjusted_kelly, cap_pct)
+    # Safety Check: If Kelly is negative, strategy has no edge
+    if kelly_pct <= 0:
+        logger.warning(f"Kelly Kriteri Negatif: Bu varlıkta istatistiksel üstünlük yok. Sinyal reddedildi.")
+        return 0.0
+
+    # JP Morgan Risk Profile: Fractional Kelly (Half Kelly)
+    fractional_kelly = kelly_pct / 2.0
+
+    # Hard Cap
+    max_risk_cap = 0.04 # Max 4% of total balance per trade
+    final_risk_pct = min(fractional_kelly, max_risk_cap)
 
     risk_amount = balance * final_risk_pct
-    stop_distance = abs(entry - stop_loss)
+    distance_to_sl = abs(entry - stop_loss)
 
-    if stop_distance == 0:
-        return 0
+    if distance_to_sl == 0: return 0.0
 
-    lot_size = risk_amount / stop_distance
-    logger.info(f"Kelly Optimizasyonu: WR %{win_rate*100:.1f}, B: {profit_factor:.2f} -> Önerilen Risk: %{final_risk_pct*100:.2f} (Sermaye: {balance:.2f}) -> {lot_size:.4f} Birim.")
+    lot_size = risk_amount / distance_to_sl
+    logger.info(f"Kelly Hesaplaması [{ticker}]: Risk= %{final_risk_pct*100:.2f} (${risk_amount:.2f}), Lot={lot_size:.4f}")
 
     return lot_size
