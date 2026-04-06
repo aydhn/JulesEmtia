@@ -76,9 +76,7 @@ class PaperBroker(BaseBroker):
             "status": "Open"
         }
 
-        trade_id = db.open_trade(trade_data)
-        logger.info(f"AUDIT TRAIL: Execution Receipt generated: {execution_receipt} | Returned Trade ID: {trade_id}")
-        return trade_id
+        return db.open_trade(trade_data)
 
     def modify_trailing_stop(self, trade_id: int, new_sl: float) -> bool:
         try:

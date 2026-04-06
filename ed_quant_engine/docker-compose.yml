@@ -10,7 +10,7 @@ services:
     environment:
       - TZ=Europe/Istanbul
     volumes:
-      - ./paper_db.sqlite3:/app/paper_db.sqlite3
-      - ./rf_model.pkl:/app/rf_model.pkl
+      - ./data/paper_db.sqlite3:/app/data/paper_db.sqlite3
+      - ./models:/app/models
       - ./logs:/app/logs
       - ./reports:/app/reports
