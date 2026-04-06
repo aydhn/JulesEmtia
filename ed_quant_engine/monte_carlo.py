@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import os
 from paper_db import get_closed_trades
-from logger import setup_logger
+from utils.logger import setup_logger
 
 logger = setup_logger("MonteCarloEngine")
 

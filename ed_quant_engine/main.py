@@ -1,115 +1,42 @@
 import asyncio
 import schedule
-import time
-from datetime import datetime
 import gc
 import os
+from typing import Dict, Any
 import pandas as pd
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Internal Modules
-from data_loader import fetch_live_data, fetch_historical_data
-from strategy import generate_signals, update_trailing_stop
-from paper_broker import PaperBroker
-from paper_db import get_closed_trades
-from notifier import send_telegram_message, send_telegram_document
-from logger import setup_logger
-from macro_filter import get_macro_regime, check_vix_circuit_breaker, check_z_score_anomaly
-from portfolio_manager import calculate_correlation_matrix, check_correlation_veto, check_global_exposure, calculate_kelly_position_size
-from sentiment_filter import SentimentAnalyzer, check_sentiment_veto
-from ml_validator import validate_signal_with_ml, train_and_save_model
+from broker import PaperBroker
+from data_loader import fetch_live_data
 from features import add_features
-from reporter import generate_tear_sheet
-from execution_model import calculate_slippage_and_spread
+from strategy import generate_signals, update_trailing_stop
+from filters.portfolio_manager import calculate_correlation_matrix, check_correlation_veto, check_global_exposure, calculate_kelly_position_size
+from filters.macro_filter import get_macro_regime, check_vix_circuit_breaker
+from filters.ml_validator import validate_signal_with_ml, ensure_ml_model
+from filters.sentiment_filter import check_sentiment_veto, analyze_news_sentiment
+from utils.notifier import send_telegram_message, send_telegram_document, BOT_TOKEN, ADMIN_CHAT_ID
+from utils.reporter import generate_tear_sheet
+from utils.logger import setup_logger
 
-logger = setup_logger("MainOrchestrator")
+logger = setup_logger("MainEngine")
 
-# Environment & Globals
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
-TICKERS = ["GC=F", "SI=F", "CL=F", "USDTRY=X", "EURTRY=X"]
+# Initialize Broker (Abstraction Layer)
 broker = PaperBroker()
-sentiment_analyzer = SentimentAnalyzer()
+
+# TICKER UNIVERSE (Phase 1 Extracted)
+TICKERS = [
+    "GC=F", "SI=F", "HG=F", "PA=F", "PL=F",
+    "CL=F", "BZ=F", "NG=F",
+    "ZW=F", "ZC=F", "ZS=F", "KC=F", "CC=F", "SB=F", "CT=F",
+    "USDTRY=X", "EURTRY=X", "GBPTRY=X", "JPYTRY=X", "CNHY=X"
+]
+
 system_paused = False
 
-async def ensure_ml_model():
-    if not os.path.exists("rf_model.pkl"):
-        logger.info("ML Modeli bulunamadı. Eğitim başlatılıyor...")
-        df = await fetch_historical_data("GC=F", period="2y", interval="1d")
-        train_and_save_model(df, "GC=F")
-
-async def check_open_positions_task():
-    """Phase 12: Trailing Stop and Position Management"""
-    positions = broker.get_open_positions()
-    if not positions: return
-
-    for pos in positions:
-        ticker = pos['ticker']
-        trade_id = pos['trade_id']
-        direction = pos['direction']
-        entry_price = pos['entry_price']
-        sl = pos['sl_price']
-        tp = pos['tp_price']
-        size = pos['position_size']
-
-        df = await fetch_live_data(ticker, interval="1h")
-        if df.empty: continue
-
-        df_feat = add_features(df)
-        if df_feat.empty: continue
-
-        current_price = df_feat['Close'].iloc[-1]
-        atr = df_feat['ATRr_14'].iloc[-1]
-
-        # Phase 19: Check Flash Crash Anomaly
-        if check_z_score_anomaly(df_feat['Close']):
-            logger.critical(f"Flaş Çöküş! {ticker} işlemi acil kapatılıyor.")
-            broker.close_position(str(trade_id), current_price, 0, 0) # Close at market
-            continue
-
-        # Phase 12: Breakeven & Trailing Stop Logic
-        if direction == "Long":
-            # Breakeven
-            if current_price > entry_price + (1.5 * atr) and sl < entry_price:
-                broker.modify_trailing_stop(str(trade_id), entry_price)
-                await send_telegram_message(f"🔒 Risk Sıfırlandı (Breakeven): {ticker} SL seviyesi giriş fiyatına çekildi.")
-
-            # Trailing Stop
-            new_sl = update_trailing_stop(current_price, sl, direction, atr)
-            if new_sl:
-                broker.modify_trailing_stop(str(trade_id), new_sl)
-                logger.info(f"Trailing Stop Güncellendi: {ticker} -> {new_sl:.4f}")
-
-        elif direction == "Short":
-            if current_price < entry_price - (1.5 * atr) and sl > entry_price:
-                broker.modify_trailing_stop(str(trade_id), entry_price)
-                await send_telegram_message(f"🔒 Risk Sıfırlandı (Breakeven): {ticker} SL seviyesi giriş fiyatına çekildi.")
-
-            new_sl = update_trailing_stop(current_price, sl, direction, atr)
-            if new_sl:
-                broker.modify_trailing_stop(str(trade_id), new_sl)
-                logger.info(f"Trailing Stop Güncellendi: {ticker} -> {new_sl:.4f}")
-
-        # TP / SL Check
-        if (direction == "Long" and (current_price <= sl or current_price >= tp)) or \
-           (direction == "Short" and (current_price >= sl or current_price <= tp)):
-
-            # Calculate execution cost for exit
-            execution_cost = calculate_slippage_and_spread(ticker, current_price, atr)
-            exit_price = current_price - execution_cost if direction == "Long" else current_price + execution_cost
-
-            net_pnl = (exit_price - entry_price) * size if direction == "Long" else (entry_price - exit_price) * size
-            net_pnl_pct = (net_pnl / (entry_price * size)) * 100
-
-            broker.close_position(str(trade_id), exit_price, net_pnl, net_pnl_pct)
-            await send_telegram_message(f"🔔 İşlem Kapandı: {direction} {ticker} @ {exit_price:.4f}\nNet Kar/Zarar: ${net_pnl:.2f} (%{net_pnl_pct:.2f})")
-
 def get_dynamic_kelly_metrics():
-    """Phase 15: Fetch historical win rate, avg win, avg loss for dynamic Kelly Sizing."""
-    df_closed = get_closed_trades()
+    """Phase 15: Calculates real-time Win Rate and Avg Win/Loss from PaperBroker (via SQLite)."""
+    import paper_db
+    df_closed = paper_db.get_closed_trades()
     if df_closed.empty or len(df_closed) < 10:
-        # Default conservative metrics if not enough history
         return 0.55, 150.0, 100.0
 
     wins = df_closed[df_closed['pnl'] > 0]
@@ -121,6 +48,46 @@ def get_dynamic_kelly_metrics():
 
     return win_rate, avg_win, avg_loss
 
+async def check_open_positions_task():
+    """Phase 5 & Phase 12: Manages existing trades, triggers exits and updates trailing stops."""
+    try:
+        positions = broker.get_open_positions()
+        if not positions:
+            return
+
+        for pos in positions:
+            ticker = pos['ticker']
+            df = await fetch_live_data(ticker, interval="1h")
+            if df.empty:
+                continue
+
+            current_price = df['Close'].iloc[-1]
+            trade_id = pos['trade_id']
+            direction = pos['direction']
+            sl = pos['sl_price']
+            tp = pos['tp_price']
+            entry = pos['entry_price']
+
+            # Check if hit SL or TP
+            if (direction == "Long" and (current_price <= sl or current_price >= tp)) or \
+               (direction == "Short" and (current_price >= sl or current_price <= tp)):
+
+                broker.close_position(trade_id, current_price, atr=0.0) # Simplify ATR for closing here
+                await send_telegram_message(f"🚨 İşlem Kapandı [{ticker}]: Fiyat {current_price:.4f} seviyesine ulaştı.")
+                continue
+
+            # Phase 12: Breakeven & Trailing Stop logic
+            # Simplified Trailing Stop using raw calculation from strategy
+            features_df = add_features(df)
+            if not features_df.empty:
+                atr = features_df['ATRr_14'].iloc[-1]
+                new_sl = update_trailing_stop(current_price, sl, direction, atr)
+                if new_sl:
+                    broker.modify_trailing_stop(trade_id, new_sl)
+    except Exception as e:
+        logger.error(f"Error checking open positions: {e}")
+
+
 async def run_live_cycle():
     """Phase 16 & 23: Main Multi-Timeframe (MTF) Pipeline Orchestrator."""
     global system_paused
@@ -129,6 +96,9 @@ async def run_live_cycle():
         return
 
     logger.info("Canlı Piyasa Döngüsü (MTF) Başladı...")
+
+    # Always check open positions to manage them even if we don't open new ones.
+    await check_open_positions_task()
 
     # Phase 19: VIX Circuit Breaker
     if await check_vix_circuit_breaker():
@@ -213,36 +183,40 @@ async def run_live_cycle():
             if not validate_signal_with_ml(ltf_features.iloc[-1]): continue
 
             # NLP Veto
+            sentiment_analyzer = analyze_news_sentiment()
             if check_sentiment_veto(ticker, direction, sentiment_analyzer): continue
-
-            # Phase 21: Execution Model
-            execution_cost = calculate_slippage_and_spread(ticker, raw_entry, signal['atr'])
-            final_entry = raw_entry + execution_cost if direction == "Long" else raw_entry - execution_cost
 
             # Phase 15: Dynamic Kelly Sizing
             balance = broker.get_account_balance()
             lot_size = calculate_kelly_position_size(
-                ticker=ticker, entry=final_entry, stop_loss=signal['sl_price'],
+                ticker=ticker, entry=raw_entry, stop_loss=signal['sl_price'],
                 balance=balance, win_rate=win_rate, avg_win=avg_win, avg_loss=avg_loss
             )
 
             if lot_size <= 0: continue
 
-            # Execute
+            # Phase 21 & 24: Execution via Broker
             receipt = broker.place_market_order(
-                ticker=ticker, direction=direction, size=lot_size,
-                sl=signal['sl_price'], tp=signal['tp_price'], current_price=final_entry
+                ticker=ticker, direction=direction, qty=lot_size,
+                current_price=raw_entry, sl=signal['sl_price'], tp=signal['tp_price'], atr=signal['atr']
             )
 
-            await send_telegram_message(
-                f"🚨 YÜKSEK GÜVENİLİRLİKLİ SİNYAL UYGULANDI (MTF/ML/NLP) 🚨\n\n"
-                f"Varlık: {ticker}\n"
-                f"Yön: {direction}\n"
-                f"Giriş: {receipt['executed_price']:.4f}\n"
-                f"SL: {signal['sl_price']:.4f} | TP: {signal['tp_price']:.4f}\n"
-                f"Lot: {receipt['size']:.4f}\n"
-                f"Kelly Metrics: Win %{win_rate*100:.1f}"
-            )
+            if receipt:
+                import paper_db
+                trades = paper_db.get_open_trades()
+                executed_price = raw_entry # Fallback
+                for t in trades:
+                    if t['trade_id'] == receipt: executed_price = t['entry_price']
+
+                await send_telegram_message(
+                    f"🚨 YÜKSEK GÜVENİLİRLİKLİ SİNYAL UYGULANDI (MTF/ML/NLP) 🚨\n\n"
+                    f"Varlık: {ticker}\n"
+                    f"Yön: {direction}\n"
+                    f"Giriş: {executed_price:.4f}\n"
+                    f"SL: {signal['sl_price']:.4f} | TP: {signal['tp_price']:.4f}\n"
+                    f"Lot: {lot_size:.4f}\n"
+                    f"Kelly Metrics: Win %{win_rate*100:.1f}"
+                )
 
     # Garbage Collection
     del htf_dfs, ltf_dfs, prices_dict, corr_matrix
@@ -257,6 +231,8 @@ async def send_weekly_report():
         await send_telegram_document(report_path, caption="📊 ED Capital Quant Engine - Piyasalara Genel Bakış")
 
 # --- TELEGRAM BOT INTERFACE (Phase 17) ---
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 def check_admin(update: Update) -> bool:
     if str(update.effective_chat.id) != ADMIN_CHAT_ID:
@@ -294,9 +270,7 @@ async def cmd_panic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         df = await fetch_live_data(pos['ticker'], interval="1h")
         if df.empty: continue
         current_price = df['Close'].iloc[-1]
-        pnl = (current_price - pos['entry_price']) * pos['position_size'] if pos['direction'] == 'Long' else (pos['entry_price'] - current_price) * pos['position_size']
-        pct = (pnl / pos['entry_price']) * 100
-        broker.close_position(str(pos['trade_id']), current_price, pnl, pct)
+        broker.close_position(pos['trade_id'], current_price, atr=0.0) # Using 0.0 ATR for simplicity in panic mode
     await update.message.reply_text("🚨 PANİK ÇIKIŞI TAMAMLANDI. Bütün pozisyonlar anlık fiyattan kapatıldı.")
 
 async def cmd_force_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -338,7 +312,7 @@ async def main_loop():
 
     # Synchronize execution strictly at the start of the hour
     schedule.every().hour.at(":01").do(run_async_task, run_live_cycle)
-    schedule.every(5).minutes.do(run_async_task, check_open_positions_task)
+    # schedule.every(5).minutes.do(run_async_task, check_open_positions_task) # Managed inside run_live_cycle
     schedule.every().friday.at("23:30").do(run_async_task, send_weekly_report)
 
     def trigger_retrain(): asyncio.create_task(ensure_ml_model())

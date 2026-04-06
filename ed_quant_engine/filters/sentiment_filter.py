@@ -2,7 +2,7 @@ import feedparser
 import nltk
 from nltk.sentiment import SentimentIntensityAnalyzer
 import pandas as pd
-from logger import setup_logger
+from utils.logger import setup_logger
 
 logger = setup_logger("SentimentFilter")
 
@@ -47,6 +47,9 @@ class SentimentAnalyzer:
         except Exception as e:
             logger.error(f"Duyarlılık analizi hatası: {str(e)}")
             return 0.0
+
+def analyze_news_sentiment() -> SentimentAnalyzer:
+    return SentimentAnalyzer()
 
 def check_sentiment_veto(ticker: str, direction: str, analyzer: SentimentAnalyzer) -> bool:
     """Blocks a signal if the overall market sentiment is strongly against the technical direction."""

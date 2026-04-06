@@ -3,7 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from paper_db import get_closed_trades
-from logger import setup_logger
+from utils.logger import setup_logger
 from datetime import datetime
 from jinja2 import Environment, FileSystemLoader
 from monte_carlo import run_monte_carlo_simulation

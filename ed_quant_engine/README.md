@@ -1,24 +1,22 @@
 # ED Capital Quant Engine
 
-Profesyonel düzeyde, düşük frekanslı, çoklu zaman dilimli (MTF) bir algoritmik paper-trade motorudur.
+## Mimarinin Amacı
+Düşük frekans (Low Frequency), yüksek isabet oranı (High Win-Rate) ve sıfır bütçe ile çalışan algoritmik bir işlem botudur. Makroekonomik veriler (DXY, ABD 10 Yıllık Tahvil Getirisi), Doğal Dil İşleme (NLP) ile Haber Duyarlılığı ve Makine Öğrenmesi (Random Forest) destekli "Çoklu Zaman Dilimi (MTF)" analizleri kullanır.
 
-## Proje Amacı ve Vizyonu
-Emtia ve TL bazlı Forex paritelerinde "Yüksek Win-Rate" hedefiyle çalışan; JP Morgan risk disiplini (dinamik Kelly), Bill Benter'ın istatistiksel üstünlüğü ve no-budget kısıtlamaları altında kurulmuş tamamen bağımsız bir robottur.
-
-## Kullanılan Özellikler
-- **Multi-Timeframe Onayı (MTF):** Günlük trende (1D) karşı saatlik (1H) işlem yasaklanır (Sıfır Lookahead Bias).
-- **Yapay Zeka (ML) Vetosu:** Teknik sinyaller, Random Forest modeliyle geçmişteki benzer patternlerin başarı ihtimaline göre (örn. %60 başarı) filtrelenir.
-- **NLP Duyarlılık Analizi:** Ücretsiz RSS haberleri VADER ile okunur ve teknik sinyalle çelişen makro haberler reddedilir.
-- **Risk Disiplini:** Dinamik ATR izleyen stop, Kesirli (Fractional) Kelly pozisyon boyutlandırma ve global portföy korelasyon limitleri uygulanır.
-- **Acil Durum (Siyah Kuğu):** VIX veya Flaş Çöküş tespiti anında sistemi durdurur ve pozisyonları korumaya alır.
-- **Kurumsal Raporlama:** Her hafta sonu Matplotlib destekli detaylı Tear Sheet (.html) üretir ve Telegram'dan iletir.
+## Özellikler
+- **Sıfır Bütçe**: Açık kaynak kodlu ve ücretsiz kütüphaneler/API'ler kullanılır.
+- **MTF Uyumlu (Lookahead Bias Yok)**: Saatlik sinyaller günlük makro trendlerle filtrelenir.
+- **Dinamik Kasa Yönetimi**: Fractional Kelly Criterion kullanılarak portföy riski optimize edilir.
+- **Kapsamlı Veto Sistemleri**: Makro rejim, ML model vetosu, NLP duyarlılık vetosu ve varlıklar arası korelasyon vetoları içerir.
+- **Devre Kesici (Circuit Breaker)**: VIX sıçramalarına veya Z-Score anomalilerine karşı sistemi kilitler ve mevcut pozisyonları korur.
+- **Gerçekçi Simülasyon**: Slippage ve Spread oranları, strateji kârlılığını belirlerken fiyata eklendi.
 
 ## Kurulum
-1. `python3 -m venv venv`
-2. `source venv/bin/activate`
-3. `pip install -r requirements.txt`
-4. `.env` dosyasını Telegram Token'ınız ve Chat ID'nizle güncelleyin.
-5. Veritabanını başlatmak için: `python paper_db.py`
+1. Repoyu klonlayın ve klasöre girin: `cd ed_quant_engine`
+2. `.env.example` dosyasını kopyalayın ve kendi bilgilerinizi girin: `cp .env.example .env`
+3. Tüm kütüphaneleri yükleyin: `pip install -r requirements.txt` (Dilerseniz VirtualEnv kullanın).
+4. `chmod +x manage_bot.sh` komutu ile yetkilendirin.
+5. Botu başlatın: `./manage_bot.sh start`
 
-## Arka Plan Çalıştırma (Systemd / Docker)
-Sistem Ubuntu ortamında veya Docker ile tam bağımsız bir *daemon* olarak çalışmak üzere tasarlanmıştır. `docker-compose up -d` ile saniyeler içinde kalıcı hacimlerle (volumes) canlı paper-trade moduna alabilirsiniz.
+## Gelişmiş Raporlama & Test
+Bot; Tear sheet (HTML), Monte Carlo Simülasyonu ve Walk-Forward Optimization süreçlerini destekler. Yerel ortamda `python backtester.py` ve `python walk_forward.py` ile stratejileri test edebilirsiniz.

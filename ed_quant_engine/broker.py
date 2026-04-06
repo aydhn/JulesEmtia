@@ -1,11 +1,12 @@
+import os
+import datetime
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
-import datetime
 import paper_db
-from execution_model import simulate_execution_cost
-from logger import get_logger
+from execution_model import calculate_slippage_and_spread
+from utils.logger import setup_logger
 
-logger = get_logger("broker")
+logger = setup_logger("broker")
 
 class BaseBroker(ABC):
     """Abstract Base Class for Broker Abstraction Layer (SOLID)."""
@@ -55,9 +56,11 @@ class PaperBroker(BaseBroker):
         """Places an order with SPL Level 3 compatible audit trail logging."""
 
         # Simulate execution costs (Spread + Slippage)
-        executed_price, spread_cost, slippage_cost = simulate_execution_cost(
-            ticker=ticker, price=current_price, direction=direction, atr=atr, avg_atr=avg_atr
+        execution_cost = calculate_slippage_and_spread(
+            ticker=ticker, current_price=current_price, current_atr=atr
         )
+
+        executed_price = current_price + execution_cost if direction == "Long" else current_price - execution_cost
 
         # Adjust SL and TP based on executed price to maintain Risk/Reward ratios
         # (Simplified: keeping raw SL/TP, but logging the worse entry)
@@ -100,9 +103,10 @@ class PaperBroker(BaseBroker):
         # Reverse direction for closing to calculate costs correctly
         close_direction = "Short" if direction == "Long" else "Long"
 
-        executed_exit_price, spread_cost, slippage_cost = simulate_execution_cost(
-            ticker=trade['ticker'], price=exit_price, direction=close_direction, atr=atr, avg_atr=avg_atr
+        execution_cost = calculate_slippage_and_spread(
+            ticker=trade['ticker'], current_price=exit_price, current_atr=atr
         )
+        executed_exit_price = exit_price + execution_cost if close_direction == "Long" else exit_price - execution_cost
 
         # Calculate PnL
         if direction == "Long":

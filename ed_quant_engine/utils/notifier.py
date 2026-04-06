@@ -2,7 +2,7 @@ import os
 import asyncio
 import requests
 from typing import Optional
-from logger import setup_logger
+from utils.logger import setup_logger
 
 logger = setup_logger("Notifier")
 
