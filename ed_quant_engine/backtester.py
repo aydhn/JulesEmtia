@@ -4,12 +4,12 @@ from typing import Dict, Any, List
 from data_loader import fetch_historical_data
 from strategy import generate_signals
 from features import add_features
-from macro_filter import get_macro_regime
-from ml_validator import validate_signal_with_ml
-from sentiment_filter import SentimentAnalyzer, check_sentiment_veto
-from portfolio_manager import calculate_correlation_matrix, check_correlation_veto
+from filters.macro_filter import get_macro_regime
+from filters.ml_validator import validate_signal_with_ml
+from filters.sentiment_filter import SentimentAnalyzer, check_sentiment_veto
+from filters.portfolio_manager import calculate_correlation_matrix, check_correlation_veto
 from execution_model import calculate_slippage_and_spread
-from logger import setup_logger
+from utils.logger import setup_logger
 
 logger = setup_logger("Backtester")
 

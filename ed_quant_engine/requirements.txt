@@ -1,31 +1,14 @@
-# Data Ingestion
-yfinance>=0.2.36
-pandas>=2.1.0
-numpy>=1.26.0
-
-# Technical Indicators
-pandas-ta>=0.3.14
-
-# Async & Scheduling
-schedule>=1.2.1
-
-# Telegram Bot API (Async)
-python-telegram-bot>=20.7
-
-# Machine Learning & Stats
-scikit-learn>=1.4.0
-joblib>=1.3.2
-scipy>=1.11.4
-
-# Natural Language Processing (News Sentiment)
-nltk>=3.8.1
-feedparser>=6.0.11
-
-# Reporting & Visualization
-matplotlib>=3.8.2
-seaborn>=0.13.1
-pdfkit>=1.0.0
-Jinja2>=3.1.3
-
-# DB & System
-python-dotenv>=1.0.1
+pandas==2.2.1
+numpy==1.26.4
+yfinance==0.2.37
+pandas-ta==0.3.14b0
+scikit-learn==1.4.1.post1
+schedule==1.2.1
+python-telegram-bot==21.0.1
+requests==2.31.0
+matplotlib==3.8.3
+seaborn==0.13.2
+jinja2==3.1.3
+feedparser==6.0.11
+nltk==3.8.1
+joblib==1.3.2

@@ -4,8 +4,10 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 import joblib
 import os
+import asyncio
 from features import add_features
-from logger import setup_logger
+from data_loader import fetch_historical_data
+from utils.logger import setup_logger
 
 logger = setup_logger("MLValidator")
 
@@ -13,6 +15,14 @@ MODEL_PATH = "rf_model.pkl"
 
 # Exact features matching pandas_ta generation in features.py
 ML_FEATURES = ['EMA_50', 'EMA_200', 'RSI_14', 'MACDh_12_26_9', 'ATRr_14', 'Log_Return']
+
+async def ensure_ml_model():
+    """Ensures that the ML model is trained and available."""
+    if not os.path.exists(MODEL_PATH):
+        logger.info("ML Modeli bulunamadı. Sıfırdan eğitiliyor...")
+        # Train on a major asset for base logic, e.g., Gold
+        historical_data = await fetch_historical_data("GC=F", period="5y", interval="1d")
+        train_and_save_model(historical_data, "GC=F")
 
 def train_and_save_model(historical_data: pd.DataFrame, ticker: str):
     """

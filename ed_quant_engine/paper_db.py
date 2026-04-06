@@ -2,7 +2,7 @@ import sqlite3
 import os
 import pandas as pd
 from typing import Optional, Dict, Any, List
-from logger import setup_logger
+from utils.logger import setup_logger
 
 logger = setup_logger("PaperDB")
 
@@ -34,24 +34,33 @@ def init_db() -> None:
     conn.close()
     logger.info("Veritabanı şeması doğrulandı.")
 
-def open_trade(ticker: str, direction: str, entry_time: str, entry_price: float, sl: float, tp: float, size: float) -> int:
+def open_trade(trade_data: dict) -> int:
     """Records a new 'Open' trade."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO trades (ticker, direction, entry_time, entry_price, sl_price, tp_price, position_size, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'Open')
-    """, (ticker, direction, entry_time, entry_price, sl, tp, size))
+    """, (trade_data['ticker'], trade_data['direction'], trade_data['entry_time'], trade_data['entry_price'], trade_data['sl_price'], trade_data['tp_price'], trade_data['position_size']))
     trade_id = cursor.lastrowid
     conn.commit()
     conn.close()
-    logger.info(f"Yeni İşlem Açıldı [ID: {trade_id}]: {direction} {ticker} @ {entry_price:.4f} (Lot: {size:.4f}) | SL: {sl:.4f} TP: {tp:.4f}")
+    logger.info(f"Yeni İşlem Açıldı [ID: {trade_id}]: {trade_data['direction']} {trade_data['ticker']} @ {trade_data['entry_price']:.4f} (Lot: {trade_data['position_size']:.4f}) | SL: {trade_data['sl_price']:.4f} TP: {trade_data['tp_price']:.4f}")
     return trade_id
 
-def close_trade(trade_id: int, exit_time: str, exit_price: float, pnl: float, pnl_percent: float) -> None:
+def close_trade(trade_id: int, exit_time: str, exit_price: float, pnl: float) -> None:
     """Marks a trade as 'Closed' and records exit details."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
+    # Fetch entry price for percentage calculation
+    cursor.execute("SELECT entry_price, direction, position_size FROM trades WHERE trade_id = ?", (trade_id,))
+    res = cursor.fetchone()
+    if res:
+        entry_price = res[0]
+        pnl_percent = (pnl / (entry_price * res[2])) * 100 if entry_price and res[2] else 0.0
+    else:
+        pnl_percent = 0.0
+
     cursor.execute("""
         UPDATE trades
         SET status = 'Closed', exit_time = ?, exit_price = ?, pnl = ?, pnl_percent = ?
@@ -70,7 +79,7 @@ def update_sl_price(trade_id: int, new_sl: float) -> None:
     conn.close()
     logger.info(f"SL Güncellendi [ID: {trade_id}]: Yeni SL: {new_sl:.4f}")
 
-def get_open_positions() -> List[Dict[str, Any]]:
+def get_open_trades() -> List[Dict[str, Any]]:
     """Retrieves all currently 'Open' trades."""
     conn = sqlite3.connect(DB_FILE)
     df = pd.read_sql_query("SELECT * FROM trades WHERE status = 'Open'", conn)
@@ -83,6 +92,15 @@ def get_closed_trades() -> pd.DataFrame:
     df = pd.read_sql_query("SELECT * FROM trades WHERE status = 'Closed'", conn)
     conn.close()
     return df
+
+def get_balance() -> float:
+    initial_balance = float(os.getenv("INITIAL_BALANCE", "10000.0"))
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT sum(pnl) FROM trades WHERE status = 'Closed'")
+    total_pnl = cursor.fetchone()[0] or 0.0
+    conn.close()
+    return initial_balance + total_pnl
 
 # Start Db immediately upon import
 init_db()

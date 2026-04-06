@@ -5,17 +5,12 @@ After=network.target
 [Service]
 Type=simple
 User=root
-# Change WorkingDirectory to the actual absolute path of ed_quant_engine
-WorkingDirectory=/path/to/ed_quant_engine
-# Use the virtual environment's Python executable
-ExecStart=/path/to/ed_quant_engine/venv/bin/python /path/to/ed_quant_engine/main.py
+WorkingDirectory=/opt/ed_quant_engine
+ExecStart=/usr/local/bin/docker-compose -f /opt/ed_quant_engine/docker-compose.yml up
+ExecStop=/usr/local/bin/docker-compose -f /opt/ed_quant_engine/docker-compose.yml stop
 Restart=always
 RestartSec=10
-StandardOutput=syslog
-StandardError=syslog
-SyslogIdentifier=quant_engine
-Environment=TZ=Europe/Istanbul
-EnvironmentFile=/path/to/ed_quant_engine/.env
+Environment="TZ=Europe/Istanbul"
 
 [Install]
 WantedBy=multi-user.target

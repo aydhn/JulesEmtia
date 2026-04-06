@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Tuple
-from logger import setup_logger
+from utils.logger import setup_logger
 from strategy import generate_signals
 
 logger = setup_logger("WalkForwardOptimizer")

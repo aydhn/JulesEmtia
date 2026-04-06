@@ -1,23 +1,16 @@
 version: '3.8'
 
 services:
-  quant_engine:
+  quant_bot:
     build: .
-    container_name: ed_capital_quant
-    restart: unless-stopped
+    container_name: ed_quant_engine
+    restart: always
     env_file:
       - .env
-    volumes:
-      - ./paper_db.sqlite3:/app/paper_db.sqlite3
-      - ./logs:/app/logs
-      - ./reports:/app/reports
-      - ./rf_model.pkl:/app/rf_model.pkl
     environment:
       - TZ=Europe/Istanbul
-      - LOG_LEVEL=INFO
-      - PYTHONUNBUFFERED=1
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+    volumes:
+      - ./paper_db.sqlite3:/app/paper_db.sqlite3
+      - ./rf_model.pkl:/app/rf_model.pkl
+      - ./logs:/app/logs
+      - ./reports:/app/reports
