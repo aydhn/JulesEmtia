@@ -1,45 +1,54 @@
 import yfinance as yf
 import pandas as pd
 import asyncio
-from typing import Dict, Optional
-from src.logger import logger
+from typing import Dict, Tuple
+from .logger import quant_logger
+from .config import TICKERS
 
 class DataLoader:
-    def __init__(self, tickers: list):
-        self.tickers = tickers
+    def __init__(self):
+        self.tickers = list(TICKERS.keys())
 
-    async def fetch_historical_data(self, ticker: str, interval: str = "1h", period: str = "1y", retries: int = 3) -> Optional[pd.DataFrame]:
-        for attempt in range(retries):
-            try:
-                # Use asyncio.to_thread for blocking calls
-                df = await asyncio.to_thread(yf.download, tickers=ticker, interval=interval, period=period, progress=False)
+    async def _fetch_single(self, ticker: str, interval: str, period: str) -> pd.DataFrame:
+        try:
+            # yfinance is blocking, run in thread
+            df = await asyncio.to_thread(yf.download, tickers=ticker, interval=interval, period=period, progress=False)
+            if df.empty:
+                return pd.DataFrame()
 
-                if df.empty:
-                    logger.warning(f"No data returned for {ticker}. Attempt {attempt+1}/{retries}")
-                    await asyncio.sleep(2 ** attempt)
-                    continue
+            # Flatten multi-index columns if yfinance returns them
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = [col[0] for col in df.columns]
 
-                # Forward fill NaNs for missing days/holidays
-                df = df.ffill().bfill()
-                df.index = pd.to_datetime(df.index).tz_localize(None) # Strip timezone for merging
+            df.dropna(inplace=True)
+            return df
+        except Exception as e:
+            quant_logger.error(f"Failed fetching {ticker} ({interval}): {e}")
+            return pd.DataFrame()
 
-                return df
+    async def get_mtf_data(self, ticker: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Fetch Daily (HTF) and Hourly (LTF) data asynchronously.
+        """
+        # Fetch HTF (1d) and LTF (1h) concurrently
+        task_htf = self._fetch_single(ticker, interval="1d", period="2y")
+        task_ltf = self._fetch_single(ticker, interval="1h", period="1y")
 
-            except Exception as e:
-                logger.error(f"Error fetching data for {ticker}: {e}. Attempt {attempt+1}/{retries}")
-                await asyncio.sleep(2 ** attempt)
+        df_htf, df_ltf = await asyncio.gather(task_htf, task_ltf)
 
-        return None
+        # Ensure timezone stripping to avoid merge_asof errors
+        for df in [df_htf, df_ltf]:
+            if not df.empty and df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
 
-    async def get_all_data(self, interval: str = "1h", period: str = "1y") -> Dict[str, pd.DataFrame]:
-        tasks = [self.fetch_historical_data(t, interval, period) for t in self.tickers]
-        results = await asyncio.gather(*tasks)
-        return {ticker: df for ticker, df in zip(self.tickers, results) if df is not None}
+        return df_htf, df_ltf
 
-if __name__ == "__main__":
-    async def test():
-        dl = DataLoader(["GC=F", "USDTRY=X"])
-        data = await dl.get_all_data(interval="1d", period="1mo")
-        for t, df in data.items():
-            print(f"{t}:\n{df.tail()}")
-    asyncio.run(test())
+    async def fetch_all(self) -> Dict[str, Tuple[pd.DataFrame, pd.DataFrame]]:
+        """Fetch MTF data for all tickers."""
+        quant_logger.info("Starting MTF data fetch for entire universe...")
+        tasks = {t: self.get_mtf_data(t) for t in self.tickers}
+        results = {}
+        for ticker, task in tasks.items():
+            results[ticker] = await task
+        quant_logger.info("MTF data fetch complete.")
+        return results

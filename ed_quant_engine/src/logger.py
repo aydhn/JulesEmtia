@@ -1,28 +1,27 @@
 import logging
-import os
 from logging.handlers import RotatingFileHandler
-from src.config import LOGS_PATH
+import os
+from .config import LOGS_DIR
 
-def setup_logger(name, log_file, level=logging.INFO):
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-    file_handler = RotatingFileHandler(
-        os.path.join(LOGS_PATH, log_file),
-        maxBytes=5*1024*1024,
-        backupCount=3
-    )
-    file_handler.setFormatter(formatter)
-
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(formatter)
-
+def setup_logger(name: str) -> logging.Logger:
     logger = logging.getLogger(name)
-    logger.setLevel(level)
+    logger.setLevel(logging.INFO)
 
+    # Avoid duplicate handlers
     if not logger.handlers:
-        logger.addHandler(file_handler)
-        logger.addHandler(stream_handler)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+        # Console Handler
+        ch = logging.StreamHandler()
+        ch.setFormatter(formatter)
+        logger.addHandler(ch)
+
+        # File Handler (5MB max, 3 backups)
+        log_file = os.path.join(LOGS_DIR, "quant_engine.log")
+        fh = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3)
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
 
     return logger
 
-logger = setup_logger("quant_engine", "quant_engine.log")
+quant_logger = setup_logger("ED_Quant")

@@ -1,113 +1,94 @@
 from abc import ABC, abstractmethod
-from typing import Dict, List, Any
-import paper_db
-from .logger import log_info, log_error, log_warning
-from datetime import datetime
+from typing import Dict, List, Optional
+import uuid
+import datetime
+from .paper_db import PaperDB
+from .config import STARTING_BALANCE
+from .logger import quant_logger
 
 class BaseBroker(ABC):
-    """
-    ED Capital Broker Soyutlama Katmanı (Interface).
-    Tüm borsa bağlantıları (Paper, Binance, IBKR) bu standart şablonu miras alır.
-    """
     @abstractmethod
-    def get_account_balance(self) -> float:
-        pass
+    def get_account_balance(self) -> float: pass
 
     @abstractmethod
-    def get_open_positions(self) -> List[dict]:
-        pass
+    def place_market_order(self, ticker: str, direction: str, size: float, current_price: float, atr: float, sl: float, tp: float) -> Optional[str]: pass
 
     @abstractmethod
-    def place_market_order(self, ticker: str, direction: str, qty: float, current_price: float, sl: float, tp: float, slippage: float, spread: float) -> str:
-        pass
+    def modify_trailing_stop(self, trade_id: int, new_sl: float) -> bool: pass
 
     @abstractmethod
-    def modify_trailing_stop(self, trade_id: str, new_sl: float) -> bool:
-        pass
+    def close_position(self, trade_id: int, exit_price: float) -> bool: pass
 
     @abstractmethod
-    def close_position(self, trade_id: str, close_price: float, reason: str) -> dict:
-        pass
+    def get_open_positions(self) -> List[Dict]: pass
 
 class PaperBroker(BaseBroker):
-    """
-    Yerel SQLite veritabanı (paper_db) ile gerçek dünyayı simüle eden Sanal Broker.
-    SPL Düzey 3 (Türev) uyumlu 'Emir İletim Fişi' (Audit Trail) bırakır.
-    """
-    def __init__(self):
-        # Eğer paper_db tablosu yoksa başlat
-        paper_db.init_db()
-        log_info("✅ PaperBroker (Sanal Broker) Başarıyla Bağlandı.")
+    def __init__(self, db: PaperDB):
+        self.db = db
+        self._cache_balance()
+
+    def _cache_balance(self):
+        closed_trades = self.db.get_all_closed_trades_df()
+        if closed_trades.empty:
+            self.balance = STARTING_BALANCE
+        else:
+            self.balance = STARTING_BALANCE + closed_trades['net_pnl'].sum()
 
     def get_account_balance(self) -> float:
-        return paper_db.get_account_balance()
+        return self.balance
 
-    def get_open_positions(self) -> List[dict]:
-        return paper_db.get_open_trades()
+    def _calculate_execution_price(self, current_price: float, atr: float, direction: str) -> float:
+        """Phase 21: Dynamic Spread & Slippage Simulation"""
+        base_spread_pct = 0.0005 # 0.05% default
+        slippage_pct = (atr / current_price) * 0.1 # Dynamic slippage based on ATR
 
-    def place_market_order(self, ticker: str, direction: str, qty: float, current_price: float, sl: float, tp: float, slippage: float, spread: float) -> str:
-        """
-        Giriş Maliyetli Emir İletimi. Market fiyatına kayma ve spread eklendiği varsayılarak
-        girilen fiyatlar (current_price) zaten Execution Model'den çıkmış olmalıdır.
-        """
-        # SPL Düzey 3 Uyumlu Denetim İzi (Audit Trail) Loglaması
-        audit_trail = {
-            "Time": datetime.now().isoformat(),
-            "Ticker": ticker,
-            "Type": "MARKET",
-            "Direction": direction,
-            "Qty": qty,
-            "ExecutedPrice": current_price,
-            "Slippage_Abs": slippage,
-            "Spread_Abs": spread,
-            "SL": sl,
-            "TP": tp
+        total_cost_pct = (base_spread_pct / 2) + slippage_pct
+
+        if direction == 'Long':
+            return current_price * (1 + total_cost_pct)
+        else:
+            return current_price * (1 - total_cost_pct)
+
+    def place_market_order(self, ticker: str, direction: str, size: float, current_price: float, atr: float, sl: float, tp: float) -> Optional[str]:
+        # Apply Slippage and Spread
+        exec_price = self._calculate_execution_price(current_price, atr, direction)
+
+        trade_data = {
+            'ticker': ticker,
+            'direction': direction,
+            'entry_time': datetime.datetime.now().isoformat(),
+            'entry_price': exec_price,
+            'sl_price': sl,
+            'tp_price': tp,
+            'position_size': size
         }
-        log_info(f"🧾 [AUDIT TRAIL] Emir İletim Fişi: {audit_trail}")
 
-        # SQLite Veritabanına Yaz
-        trade_id = paper_db.open_trade(ticker, direction, current_price, sl, tp, qty)
-        return trade_id
+        trade_id = self.db.open_trade(trade_data)
+        if trade_id != -1:
+            # SPL Level 3 Execution Receipt Log
+            receipt_id = str(uuid.uuid4())
+            quant_logger.info(f"[EXECUTION RECEIPT] ID: {receipt_id} | {direction} {size:.4f} {ticker} @ {exec_price:.4f} (Market: {current_price:.4f})")
+            return str(trade_id)
+        return None
 
-    def modify_trailing_stop(self, trade_id: str, new_sl: float) -> bool:
-        """
-        Zarar kes seviyesini günceller (Sadece lehe hareket edebilir).
-        """
-        paper_db.update_sl_price(trade_id, new_sl)
-        log_info(f"🔄 [BROKER] İşlem {trade_id[:8]} için SL {new_sl:.4f} olarak güncellendi.")
+    def modify_trailing_stop(self, trade_id: int, new_sl: float) -> bool:
+        self.db.update_sl_price(trade_id, new_sl)
         return True
 
-    def close_position(self, trade_id: str, close_price: float, reason: str) -> dict:
-        """
-        İşlemi kapatır ve Kar/Zararı (PnL) net olarak SQLite bakiyesine ekler.
-        """
-        # İşlem detayını bul
-        trades = self.get_open_positions()
-        trade = next((t for t in trades if t['trade_id'] == trade_id), None)
+    def close_position(self, trade_id: int, exit_price: float, direction: str, entry_price: float, size: float, atr: float) -> bool:
+        exec_price = self._calculate_execution_price(exit_price, atr, "Short" if direction == "Long" else "Long")
 
-        if not trade:
-            log_error(f"❌ Kapatılacak açık işlem ({trade_id}) bulunamadı!")
-            return {}
-
-        entry_price = trade['entry_price']
-        qty = trade['position_size']
-        direction = trade['direction']
-
-        # Brüt PnL
-        if direction == "Long":
-            pnl = (close_price - entry_price) * qty
+        if direction == 'Long':
+            gross_pnl = (exec_price - entry_price) * size
         else:
-            pnl = (entry_price - close_price) * qty
+            gross_pnl = (entry_price - exec_price) * size
 
-        # SQLite'ı Güncelle
-        paper_db.close_trade(trade_id, close_price, pnl)
+        commission = abs(exec_price * size) * 0.0001 # 0.01% commission
+        net_pnl = gross_pnl - commission
 
-        # Kapanış Fişi
-        receipt = {
-            "TradeID": trade_id,
-            "ClosePrice": close_price,
-            "Reason": reason,
-            "NetPnL": pnl
-        }
-        log_info(f"💸 [BROKER] İşlem Kapandı ({reason}): {pnl:.2f}$ PnL (Fiyat: {close_price:.4f})")
-        return receipt
+        self.db.close_trade(trade_id, datetime.datetime.now().isoformat(), exec_price, gross_pnl, net_pnl)
+        self._cache_balance()
+        return True
+
+    def get_open_positions(self) -> List[Dict]:
+        return self.db.get_open_positions()
