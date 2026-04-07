@@ -1,9 +1,14 @@
 .env
 __pycache__/
 *.pyc
+*.pyo
 logs/
 reports/
-paper_db.sqlite3
-rf_model.pkl
+data/
+models/
+*.sqlite3
+*.db
+*.pkl
 .vscode/
 .DS_Store
+.pytest_cache/

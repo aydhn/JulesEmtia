@@ -10,11 +10,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Create necessary directories
+RUN mkdir -p /app/data /app/models /app/logs /app/reports
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
 RUN chmod +x manage_bot.sh deploy.sh
+
+# Best practice: run as non-root
+RUN useradd -m quantuser && chown -R quantuser:quantuser /app
+USER quantuser
 
 CMD ["python", "main.py"]
