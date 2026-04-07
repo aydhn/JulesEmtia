@@ -1,16 +1,16 @@
 version: '3.8'
 
 services:
-  quant_bot:
+  quant_engine:
     build: .
     container_name: ed_quant_engine
     restart: always
     env_file:
       - .env
-    environment:
-      - TZ=Europe/Istanbul
     volumes:
-      - ./data/paper_db.sqlite3:/app/data/paper_db.sqlite3
+      - ./data:/app/data
       - ./models:/app/models
       - ./logs:/app/logs
       - ./reports:/app/reports
+    environment:
+      - TZ=Europe/Istanbul

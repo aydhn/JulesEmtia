@@ -1,84 +1,40 @@
 import numpy as np
 import pandas as pd
-from typing import List, Dict
-from src.paper_db import db
-from src.logger import logger
+from typing import Dict
+from .logger import quant_logger
 
 class MonteCarloSimulator:
-    def __init__(self, simulations: int = 10000, start_capital: float = 10000.0):
-        self.simulations = simulations
-        self.start_capital = start_capital
+    @staticmethod
+    def run_simulation(closed_trades: pd.DataFrame, n_sims: int = 10000) -> Dict:
+        """Phase 22: Fast Vectorized Monte Carlo & Risk of Ruin"""
+        if closed_trades.empty or len(closed_trades) < 10:
+            return {"max_dd_99": 0.0, "risk_of_ruin": 0.0}
 
-    def _get_historical_pnls(self) -> List[float]:
-        """
-        Fetches PnL percentages from closed trades in paper_db.
-        """
-        try:
-            db.cursor.execute("SELECT pnl FROM trades WHERE status = 'Closed' AND pnl IS NOT NULL")
-            results = db.cursor.fetchall()
-            return [row[0] for row in results]
-        except Exception as e:
-            logger.error(f"Error fetching historical PnLs for Monte Carlo: {e}")
-            return []
+        returns = closed_trades['net_pnl'].values / 10000.0 # Assuming 10k start logic for pct
+        n_trades = len(returns)
 
-    def run_simulation(self) -> Dict:
-        """
-        Runs Monte Carlo simulation by randomly resampling historical PnL sequences.
-        """
-        historical_pnls = self._get_historical_pnls()
-        if not historical_pnls or len(historical_pnls) < 10:
-             logger.warning("Not enough historical trades for Monte Carlo simulation.")
-             return {}
+        # Vectorized simulation with replacement
+        sims = np.random.choice(returns, size=(n_sims, n_trades), replace=True)
 
-        logger.info(f"Starting Monte Carlo with {self.simulations} simulations using {len(historical_pnls)} trades.")
+        # Cumulative returns
+        cum_returns = np.cumsum(sims, axis=1)
 
-        # Convert to numpy array for speed
-        pnls = np.array(historical_pnls)
+        # Drawdowns
+        running_max = np.maximum.accumulate(cum_returns, axis=1)
+        drawdowns = cum_returns - running_max
+        max_drawdowns = np.min(drawdowns, axis=1)
 
-        # Preallocate memory for results
-        final_returns = np.zeros(self.simulations)
-        max_drawdowns = np.zeros(self.simulations)
+        # Metrics
+        max_dd_99 = np.percentile(max_drawdowns, 1) # 1st percentile (worst 1%)
 
-        # Vectorized resampling
-        # Matrix shape: (num_simulations, num_trades_to_simulate)
-        # We simulate the same number of trades as we have history for.
-        num_trades = len(pnls)
+        # Risk of Ruin (Losing > 50%)
+        ruin_count = np.sum(np.any(cum_returns <= -0.50, axis=1))
+        risk_of_ruin = ruin_count / n_sims
 
-        for i in range(self.simulations):
-            # Sample with replacement
-            simulated_pnls = np.random.choice(pnls, size=num_trades, replace=True)
+        if risk_of_ruin > 0.01:
+            quant_logger.warning(f"HIGH RISK OF RUIN DETECTED: {risk_of_ruin*100:.2f}%")
 
-            # Cumulative return (Compounding)
-            # Assuming Kelly-sized returns are percentage of capital
-            cumulative_returns = np.cumprod(1 + simulated_pnls)
-
-            final_returns[i] = cumulative_returns[-1]
-
-            # Drawdown Calculation
-            rolling_max = np.maximum.accumulate(cumulative_returns)
-            drawdowns = (cumulative_returns - rolling_max) / rolling_max
-            max_drawdowns[i] = np.min(drawdowns)
-
-        # Calculate Risk Metrics
-        expected_mdd_95 = np.percentile(max_drawdowns, 5)  # 5th percentile is worst 5% case
-        expected_mdd_99 = np.percentile(max_drawdowns, 1)  # 1st percentile is worst 1% case
-
-        # Risk of Ruin: Probability of losing 50% or more (i.e. return < 0.5)
-        # If any path's lowest point drops below 0.5 of initial, we consider it ruin.
-        # But for simplicity, we just look at the final return distribution or the MDD distribution.
-        # Let's say Ruin = MDD > 50%
-        ruin_events = np.sum(max_drawdowns <= -0.50)
-        risk_of_ruin = ruin_events / self.simulations
-
-        results = {
-            "Simulations": self.simulations,
-            "Trades Simulated per Run": num_trades,
-            "Median Return": np.median(final_returns),
-            "Expected Max Drawdown (95% CI)": expected_mdd_95,
-            "Expected Max Drawdown (99% CI)": expected_mdd_99,
-            "Risk of Ruin (MDD > 50%)": risk_of_ruin
+        return {
+            "max_dd_99": max_dd_99 * 100, # as percentage
+            "risk_of_ruin": risk_of_ruin * 100
         }
-
-        logger.info(f"Monte Carlo Results: MDD 99%: {expected_mdd_99:.2f}, Ruin Risk: {risk_of_ruin:.4f}")
-        return results
-

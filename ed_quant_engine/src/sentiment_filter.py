@@ -1,86 +1,56 @@
 import feedparser
-from nltk.sentiment import SentimentIntensityAnalyzer
-import nltk
-from src.logger import logger
-from src.config import ALL_TICKERS
-from datetime import datetime, timedelta
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+import asyncio
+from typing import Dict
+from .logger import quant_logger
 
-# Download VADER lexicon if not already present
-try:
-    nltk.data.find('sentiment/vader_lexicon')
-except LookupError:
-    nltk.download('vader_lexicon')
-
-class SentimentFilter:
-    def __init__(self, cache_ttl_hours: int = 12, threshold: float = -0.3):
+class NLPSentimentFilter:
+    def __init__(self):
         self.sia = SentimentIntensityAnalyzer()
-        self.rss_feeds = [
-            "https://feeds.finance.yahoo.com/rss/2.0/headline?s=GC=F,SI=F,CL=F,EURUSD=X", # Example Yahoo feeds
-            # Add more relevant feeds
+        # RSS Feeds (Yahoo Finance general + Commodities)
+        self.feeds = [
+            "https://finance.yahoo.com/news/rssindex",
+            "https://www.investing.com/rss/news_11.rss" # Commodities
         ]
-        self.cache = {}
-        self.cache_ttl = timedelta(hours=cache_ttl_hours)
-        self.threshold = threshold
-
-    def _fetch_news(self) -> list:
-        headlines = []
-        for url in self.rss_feeds:
-            try:
-                feed = feedparser.parse(url)
-                for entry in feed.entries:
-                    headlines.append(entry.title)
-            except Exception as e:
-                logger.error(f"Error fetching RSS from {url}: {e}")
-        return headlines
-
-    def update_sentiment_cache(self):
-        """
-        Fetches news, calculates average sentiment, and stores in cache.
-        """
-        headlines = self._fetch_news()
-        if not headlines:
-            logger.warning("No news headlines fetched.")
-            return
-
-        total_compound = 0
-        for text in headlines:
-            score = self.sia.polarity_scores(text)['compound']
-            total_compound += score
-
-        avg_sentiment = total_compound / len(headlines) if headlines else 0
-
-        # Simplified: one global macro sentiment for now.
-        # Can be enhanced to search for ticker-specific keywords in headlines.
-        self.cache['macro'] = {
-            'score': avg_sentiment,
-            'timestamp': datetime.now()
+        self.keywords = {
+            "Gold": ["gold", "xau", "bullion"],
+            "Oil": ["oil", "wti", "brent", "crude", "opec"],
+            "Forex": ["fed", "inflation", "rates", "dollar", "powell", "cpi"],
         }
-        logger.info(f"Updated Sentiment Cache. Macro Score: {avg_sentiment:.2f}")
 
-    def veto_signal(self, ticker: str, direction: str) -> bool:
+    async def _fetch_feed(self, url: str) -> list:
+        try:
+            feed = await asyncio.to_thread(feedparser.parse, url)
+            return feed.entries
+        except Exception as e:
+            quant_logger.error(f"RSS fetch failed for {url}: {e}")
+            return []
+
+    async def get_market_sentiment(self) -> Dict[str, float]:
         """
-        Returns True if the signal is vetoed based on sentiment.
+        Reads RSS feeds, scores headlines via VADER, aggregates by category.
+        Returns a dict of sentiment scores (-1.0 to 1.0)
         """
-        # 1. Check if cache is valid
-        if 'macro' not in self.cache or datetime.now() - self.cache['macro']['timestamp'] > self.cache_ttl:
-             logger.warning("Sentiment cache missing or stale. Fetching now.")
-             self.update_sentiment_cache()
+        sentiment_scores = {"Gold": 0.0, "Oil": 0.0, "Forex": 0.0}
+        counts = {"Gold": 0, "Oil": 0, "Forex": 0}
 
-        score = self.cache.get('macro', {}).get('score', 0)
+        tasks = [self._fetch_feed(url) for url in self.feeds]
+        all_entries = await asyncio.gather(*tasks)
 
-        # 2. Apply Veto Logic
-        # Ex: If Long signal but sentiment is very negative -> Veto
-        if direction == "Long" and score <= self.threshold:
-             logger.info(f"Sentiment Veto: {direction} on {ticker} rejected. (Score {score:.2f} <= {self.threshold})")
-             return True
+        for entries in all_entries:
+            for entry in entries:
+                title = entry.title.lower()
+                score = self.sia.polarity_scores(title)['compound']
 
-        # Ex: If Short signal but sentiment is very positive -> Veto
-        if direction == "Short" and score >= abs(self.threshold):
-             logger.info(f"Sentiment Veto: {direction} on {ticker} rejected. (Score {score:.2f} >= {abs(self.threshold)})")
-             return True
+                for category, words in self.keywords.items():
+                    if any(w in title for w in words):
+                        sentiment_scores[category] += score
+                        counts[category] += 1
 
-        # High Conviction (Optional: Could increase lot size if matching, but keeping simple for now)
-        if (direction == "Long" and score > 0.2) or (direction == "Short" and score < -0.2):
-             logger.info(f"High Conviction Signal: {direction} on {ticker} matches sentiment ({score:.2f}).")
+        # Average the scores
+        for category in sentiment_scores:
+            if counts[category] > 0:
+                sentiment_scores[category] /= counts[category]
 
-        return False
+        quant_logger.info(f"NLP Sentiment Updated: {sentiment_scores}")
+        return sentiment_scores

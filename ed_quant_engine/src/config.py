@@ -1,25 +1,31 @@
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
 
 # Ticker Universe
 TICKERS = {
-    "METALS": ["GC=F", "SI=F", "HG=F", "PA=F", "PL=F"],
-    "ENERGY": ["CL=F", "BZ=F", "NG=F", "HO=F", "RB=F"],
-    "AGRI": ["ZW=F", "ZC=F", "ZS=F", "KC=F", "CC=F", "SB=F", "CT=F", "LE=F"],
-    "FOREX_TRY": ["USDTRY=X", "EURTRY=X", "GBPTRY=X", "JPYTRY=X", "CNHY=X", "CHFTRY=X", "AUDTRY=X"]
+    # Precious Metals
+    "GC=F": "Gold", "SI=F": "Silver", "HG=F": "Copper", "PA=F": "Palladium", "PL=F": "Platinum",
+    # Energy
+    "CL=F": "WTI Crude", "BZ=F": "Brent", "NG=F": "Natural Gas", "HO=F": "Heating Oil", "RB=F": "Gasoline",
+    # Agriculture
+    "ZW=F": "Wheat", "ZC=F": "Corn", "ZS=F": "Soybeans", "KC=F": "Coffee", "CC=F": "Cocoa", "SB=F": "Sugar", "CT=F": "Cotton", "LE=F": "Live Cattle",
+    # Forex (TRY specific)
+    "USDTRY=X": "USD/TRY", "EURTRY=X": "EUR/TRY", "GBPTRY=X": "GBP/TRY", "JPYTRY=X": "JPY/TRY", "CNHTRY=X": "CNH/TRY", "CHFTRY=X": "CHF/TRY"
 }
 
-ALL_TICKERS = [ticker for category in TICKERS.values() for ticker in category]
+# Bot Constraints
+STARTING_BALANCE = 10000.0
+MAX_POSITIONS = 4
+MAX_GLOBAL_RISK_PCT = 0.06  # Max 6% of total capital across all positions
 
-DB_PATH = os.getenv("DB_PATH", "data/paper_db.sqlite3")
-MODELS_PATH = os.getenv("MODELS_PATH", "models/")
-LOGS_PATH = os.getenv("LOGS_PATH", "logs/")
+# Directories
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+LOGS_DIR = os.path.join(BASE_DIR, "logs")
+REPORTS_DIR = os.path.join(BASE_DIR, "reports")
 
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-os.makedirs(MODELS_PATH, exist_ok=True)
-os.makedirs(LOGS_PATH, exist_ok=True)
+# Ensure dirs exist
+for d in [DATA_DIR, MODELS_DIR, LOGS_DIR, REPORTS_DIR]:
+    os.makedirs(d, exist_ok=True)
+
+DB_PATH = os.path.join(DATA_DIR, "paper_db.sqlite3")

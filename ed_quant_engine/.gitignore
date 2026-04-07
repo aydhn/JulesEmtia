@@ -1,14 +1,32 @@
-.env
+# Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# SQLite Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs and Reports
 logs/
 reports/
-data/
-models/
-*.sqlite3
-*.db
-*.pkl
+*.log
+
+# VS Code / IDE
 .vscode/
-.DS_Store
-.pytest_cache/
+.idea/
+
+# ML Models
+models/*.pkl
+models/*.joblib

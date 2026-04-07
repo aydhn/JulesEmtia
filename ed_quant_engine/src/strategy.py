@@ -1,84 +1,95 @@
 import pandas as pd
-import numpy as np
 from typing import Dict, Optional
-from src.logger import logger
+from .logger import quant_logger
 
-class Strategy:
-    def __init__(self, atr_sl_multiplier: float = 1.5, atr_tp_multiplier: float = 3.0, default_capital: float = 10000.0, max_risk_pct: float = 0.02):
-        self.atr_sl_multiplier = atr_sl_multiplier
-        self.atr_tp_multiplier = atr_tp_multiplier
-        self.default_capital = default_capital
-        self.max_risk_pct = max_risk_pct
-
-    def generate_signal(self, ticker: str, df: pd.DataFrame) -> Optional[Dict]:
+class StrategyEngine:
+    @staticmethod
+    def check_signals(df: pd.DataFrame) -> Optional[str]:
         """
-        Generates trading signals using confluent indicators and strict lookahead bias prevention.
-        Uses vectorized operations to check logic on the last completely closed candle.
+        Phase 4 & 16: Confluence & MTF Signal Generation.
+        We strictly look at the previous closed candle (-2 if currently forming, or -1 if locked).
+        Assuming main loop fetches finalized candles via shift logic in features.
         """
-        # Strictly use shift(1) logic implicitly by checking the LAST row of the provided DataFrame
-        # (Assuming the main loop only provides fully closed candles).
-        last_row = df.iloc[-1]
-        prev_row = df.iloc[-2]
+        if df.empty or len(df) < 5:
+            return None
 
-        current_price = last_row['Close']
-        ema_50 = last_row['EMA_50']
-        rsi_14 = last_row['RSI_14']
-        macd_hist = last_row['MACD_Hist']
-        bb_lower = last_row['BB_Lower']
-        bb_upper = last_row['BB_Upper']
-        atr = last_row['ATR_14']
+        # Look at the most recently COMPLETED candle
+        last_closed = df.iloc[-1]
 
-        # Determine Trend
-        is_uptrend = current_price > ema_50
-        is_downtrend = current_price < ema_50
+        # HTF (Daily) Trend Veto check (If available)
+        htf_trend_up = True
+        htf_trend_down = True
+        if 'EMA_50_HTF' in last_closed:
+            htf_trend_up = last_closed['Close_HTF'] > last_closed['EMA_50_HTF']
+            htf_trend_down = last_closed['Close_HTF'] < last_closed['EMA_50_HTF']
 
-        # Oscillators (Confluence)
-        rsi_oversold = prev_row['RSI_14'] < 30 and rsi_14 >= 30 # RSI crossed up
-        rsi_overbought = prev_row['RSI_14'] > 70 and rsi_14 <= 70 # RSI crossed down
+        # LTF (Hourly) Oscillators
+        rsi = last_closed.get('RSI_14', 50)
+        macd = last_closed.get('MACDh_12_26_9', 0)
+        close = last_closed['Close']
+        ema_50 = last_closed.get('EMA_50', close)
+        bb_lower = last_closed.get('BBL_20_2.0', 0)
+        bb_upper = last_closed.get('BBU_20_2.0', 999999)
 
-        price_touch_lower_bb = prev_row['Low'] <= prev_row['BB_Lower'] and last_row['Close'] > bb_lower
-        price_touch_upper_bb = prev_row['High'] >= prev_row['BB_Upper'] and last_row['Close'] < bb_upper
+        # LONG Confluence
+        if htf_trend_up and close > ema_50:
+            if (rsi < 35 or close <= bb_lower) and macd > 0:
+                return 'Long'
 
-        macd_positive_crossover = prev_row['MACD_Hist'] <= 0 and macd_hist > 0
-        macd_negative_crossover = prev_row['MACD_Hist'] >= 0 and macd_hist < 0
-
-        signal = None
-        direction = None
-
-        # Long Signal Logic
-        if is_uptrend and (rsi_oversold or price_touch_lower_bb) and macd_positive_crossover:
-            direction = "Long"
-            sl_price = current_price - (self.atr_sl_multiplier * atr)
-            tp_price = current_price + (self.atr_tp_multiplier * atr)
-            signal = 1
-
-        # Short Signal Logic
-        elif is_downtrend and (rsi_overbought or price_touch_upper_bb) and macd_negative_crossover:
-            direction = "Short"
-            sl_price = current_price + (self.atr_sl_multiplier * atr)
-            tp_price = current_price - (self.atr_tp_multiplier * atr)
-            signal = -1
-
-        if signal:
-            # Position Sizing
-            risk_amount = self.default_capital * self.max_risk_pct
-            sl_distance = abs(current_price - sl_price)
-            if sl_distance > 0:
-                position_size = risk_amount / sl_distance
-            else:
-                position_size = 0
-                logger.warning(f"SL distance is zero for {ticker}. Skipping trade.")
-                return None
-
-            return {
-                "ticker": ticker,
-                "direction": direction,
-                "entry_price": current_price,
-                "sl_price": sl_price,
-                "tp_price": tp_price,
-                "position_size": position_size,
-                "signal_type": signal
-            }
+        # SHORT Confluence
+        if htf_trend_down and close < ema_50:
+            if (rsi > 65 or close >= bb_upper) and macd < 0:
+                return 'Short'
 
         return None
 
+    @staticmethod
+    def calculate_dynamic_risk(entry_price: float, atr: float, direction: str) -> tuple[float, float]:
+        """Phase 4: Dynamic JP Morgan Risk Mgmt (SL/TP)"""
+        if direction == 'Long':
+            sl = entry_price - (1.5 * atr)
+            tp = entry_price + (3.0 * atr)
+        else:
+            sl = entry_price + (1.5 * atr)
+            tp = entry_price - (3.0 * atr)
+        return sl, tp
+
+    @staticmethod
+    def check_trade_management(pos: Dict, current_price: float, current_atr: float) -> tuple[str, float]:
+        """
+        Phase 12: Breakeven & Trailing Stop logic.
+        Returns Action ('CLOSE_TP', 'CLOSE_SL', 'UPDATE_SL', 'HOLD') and new value.
+        """
+        entry = pos['entry_price']
+        sl = pos['sl_price']
+        tp = pos['tp_price']
+        direction = pos['direction']
+
+        # Hit TP or SL?
+        if direction == 'Long':
+            if current_price >= tp: return 'CLOSE_TP', current_price
+            if current_price <= sl: return 'CLOSE_SL', current_price
+        else:
+            if current_price <= tp: return 'CLOSE_TP', current_price
+            if current_price >= sl: return 'CLOSE_SL', current_price
+
+        # Trailing Stop & Breakeven Logic
+        if direction == 'Long':
+            # Breakeven check
+            if current_price >= entry + (1.0 * current_atr) and sl < entry:
+                return 'UPDATE_SL', entry
+
+            # Trailing stop check (strictly monotonic)
+            new_sl = current_price - (1.5 * current_atr)
+            if new_sl > sl:
+                return 'UPDATE_SL', new_sl
+
+        else: # Short
+            if current_price <= entry - (1.0 * current_atr) and sl > entry:
+                return 'UPDATE_SL', entry
+
+            new_sl = current_price + (1.5 * current_atr)
+            if new_sl < sl:
+                return 'UPDATE_SL', new_sl
+
+        return 'HOLD', 0.0
