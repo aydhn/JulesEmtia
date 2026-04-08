@@ -1,76 +1,137 @@
 import pandas as pd
 import numpy as np
 import logging
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 
 class Backtester:
     """
-    Phase 7: Historical Backtesting
-    Phase 14: Walk-Forward Optimization (WFO)
+    Phase 7: Historical Backtesting Engine
+    Executes Strategy across historical data accurately including slippage/commission.
     """
-    def __init__(self):
-        pass
+    def __init__(self, initial_capital: float = 10000.0, slippage_pct: float = 0.0010, comm_pct: float = 0.0005):
+        self.initial_capital = initial_capital
+        self.slippage_pct = slippage_pct
+        self.comm_pct = comm_pct
 
-    def run_backtest(self, df: pd.DataFrame) -> dict:
-        """Simple vectorized backtest for strategy validation."""
-        # A full backtest implementation would execute the Strategy over historical data.
-        # This is a stub for integration purposes.
-        logger.info("Running vectorized historical backtest...")
-        return {"win_rate": 0.65, "profit_factor": 1.8, "total_pnl": 5000}
-
-    def walk_forward_optimization(self, df: pd.DataFrame, is_window: int = 500, oos_window: int = 100):
+    def run_backtest(self, mtf_df: pd.DataFrame, strategy_func, atr_sl_mult=1.5, atr_tp_mult=3.0) -> Dict:
         """
-        Executes Walk-Forward Optimization.
-        Checks Walk-Forward Efficiency (WFE) to prevent overfitting.
+        Iterative backtest mimicking live execution to extract realistic PnL.
+        Phase 7 constraints: 0.1% slippage, 0.05% commission.
         """
-        logger.info(f"Running WFO (IS: {is_window}, OOS: {oos_window})...")
+        logger.info("Running realistic historical backtest...")
+        if mtf_df is None or mtf_df.empty or len(mtf_df) < 50:
+            return {"total_trades": 0, "win_rate": 0, "profit_factor": 0, "total_pnl": 0, "max_dd": 0}
 
-        if df.empty or len(df) < (is_window + oos_window):
-            logger.warning("Not enough data for WFO.")
-            return False
+        balance = self.initial_capital
+        peak_balance = balance
+        max_dd = 0.0
 
-        # Simulate sliding windows
-        total_len = len(df)
-        start_idx = 0
-        wfe_results = []
+        trades = []
+        open_trade = None
 
-        # We simulate optimization simply by comparing returns.
-        # In a real engine, we would grid search parameters here.
-        # We assume parameters are static for this simulation to calculate robustness.
+        # Iterate over DataFrame to simulate time
+        for i in range(2, len(mtf_df)):
+            current_idx = mtf_df.index[i]
+            current_row = mtf_df.iloc[i]
 
-        while start_idx + is_window + oos_window <= total_len:
-            # Split data
-            is_df = df.iloc[start_idx : start_idx + is_window]
-            oos_df = df.iloc[start_idx + is_window : start_idx + is_window + oos_window]
+            # To avoid lookahead bias, signals must be generated using data UP TO previous candle
+            # Because strategy.generate_signal expects the whole dataframe up to point of evaluation,
+            # we slice up to i. The strategy itself looks at mtf_df.iloc[-2] for signals (the completed candle).
+            slice_df = mtf_df.iloc[:i+1]
 
-            # Simulated IS Return (Annualized) - stub logic for demonstration
-            # In real system, this calls run_backtest()
-            is_res = self.run_backtest(is_df)
-            is_return = is_res.get("total_pnl", 1) / 10000.0  # normalized
-            is_ann = is_return * (252 / is_window) if is_window > 0 else 0
+            # 1. Manage Open Trade
+            if open_trade is not None:
+                curr_price = float(current_row['Close'])
+                high = float(current_row['High'])
+                low = float(current_row['Low'])
 
-            # Simulated OOS Return
-            oos_res = self.run_backtest(oos_df)
-            oos_return = oos_res.get("total_pnl", 1) / 10000.0 # normalized
-            oos_ann = oos_return * (252 / oos_window) if oos_window > 0 else 0
+                # Check hits
+                sl_hit = False
+                tp_hit = False
+                exit_price = 0.0
 
-            # Calculate WFE
-            if is_ann > 0:
-                wfe = oos_ann / is_ann
-            else:
-                wfe = 0.0
+                if open_trade['dir'] == "LONG":
+                    if low <= open_trade['sl']:
+                        sl_hit = True
+                        exit_price = open_trade['sl']
+                    elif high >= open_trade['tp']:
+                        tp_hit = True
+                        exit_price = open_trade['tp']
+                else:
+                    if high >= open_trade['sl']:
+                        sl_hit = True
+                        exit_price = open_trade['sl']
+                    elif low <= open_trade['tp']:
+                        tp_hit = True
+                        exit_price = open_trade['tp']
 
-            wfe_results.append(wfe)
-            start_idx += oos_window
+                if sl_hit or tp_hit:
+                    # Apply execution costs on exit
+                    exit_price_net = exit_price * (1 - self.slippage_pct) if open_trade['dir'] == "LONG" else exit_price * (1 + self.slippage_pct)
+                    gross_pnl = (exit_price_net - open_trade['entry']) * open_trade['size'] if open_trade['dir'] == "LONG" else (open_trade['entry'] - exit_price_net) * open_trade['size']
+                    net_pnl = gross_pnl - (exit_price_net * open_trade['size'] * self.comm_pct)
 
-        avg_wfe = np.mean(wfe_results) if wfe_results else 0.0
-        logger.info(f"WFO Average Walk-Forward Efficiency (WFE): {avg_wfe:.2f}")
+                    balance += net_pnl
+                    if balance > peak_balance:
+                        peak_balance = balance
+                    else:
+                        dd = (peak_balance - balance) / peak_balance
+                        if dd > max_dd:
+                            max_dd = dd
 
-        # Critical Rule: If WFE < 0.5, reject parameters
-        if avg_wfe < 0.5:
-            logger.warning("Parameters rejected due to low Walk-Forward Efficiency (Overfitted).")
-            return False
+                    trades.append(net_pnl)
+                    open_trade = None
+                    continue # Wait for next candle to open new trade
 
-        logger.info("WFO complete. Robust parameters selected.")
-        return True
+            # 2. Check for New Signals if no open trade
+            if open_trade is None:
+                signal = strategy_func(slice_df)
+                if signal:
+                    direction = signal['dir']
+                    signal_price = float(signal['price'])
+                    atr = float(signal['atr'])
+
+                    # Apply execution costs on entry
+                    entry_price = signal_price * (1 + self.slippage_pct) if direction == "LONG" else signal_price * (1 - self.slippage_pct)
+
+                    # Position sizing (Assume 2% risk)
+                    risk_amount = balance * 0.02
+                    sl_dist = atr_sl_mult * atr
+                    if sl_dist == 0: continue
+
+                    size = risk_amount / sl_dist
+                    comm_cost = entry_price * size * self.comm_pct
+                    balance -= comm_cost # Deduct commission immediately
+
+                    sl = entry_price - sl_dist if direction == "LONG" else entry_price + sl_dist
+                    tp = entry_price + (atr_tp_mult * atr) if direction == "LONG" else entry_price - (atr_tp_mult * atr)
+
+                    open_trade = {
+                        "dir": direction,
+                        "entry": entry_price,
+                        "size": size,
+                        "sl": sl,
+                        "tp": tp
+                    }
+
+        # Calculate metrics
+        total_trades = len(trades)
+        wins = [t for t in trades if t > 0]
+        losses = [t for t in trades if t <= 0]
+
+        win_rate = len(wins) / total_trades if total_trades > 0 else 0
+        gross_profit = sum(wins)
+        gross_loss = abs(sum(losses))
+
+        profit_factor = gross_profit / gross_loss if gross_loss != 0 else 99.0
+        total_pnl = balance - self.initial_capital
+
+        return {
+            "total_trades": total_trades,
+            "win_rate": win_rate,
+            "profit_factor": profit_factor,
+            "total_pnl": total_pnl,
+            "max_dd": max_dd
+        }
