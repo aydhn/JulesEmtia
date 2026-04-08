@@ -1,16 +1,17 @@
-version: "3.8"
+version: '3.8'
 
 services:
-  quant_bot:
+  quant_engine:
     build: .
     container_name: ed_quant_engine
     restart: always
     environment:
-      - TZ=Europe/Istanbul
-    env_file:
-      - .env
+      - TZ=${TZ:-Europe/Istanbul}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./models:/app/models
       - ./reports:/app/reports
+    network_mode: "host"

@@ -1,40 +1,29 @@
 FROM python:3.10-slim
 
-# OS Gerekli Paketler ve Saat Dilimi
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    tzdata \
-    && rm -rf /var/lib/apt/lists/*
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
 
-ENV TZ=Europe/Istanbul
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
-
-# Non-root Kullanıcı
-RUN useradd -m quantuser
-
+# Set the working directory
 WORKDIR /app
 
-# Dosya İzinleri ve Klasörler
-RUN mkdir -p /app/data /app/models /app/logs /app/reports && \
-    chown -R quantuser:quantuser /app
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
+# Install python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# NLTK verisini indir
-RUN python -m nltk.downloader vader_lexicon -d /usr/share/nltk_data || true
+# Download NLTK data (vader_lexicon)
+RUN python -m nltk.downloader vader_lexicon
 
-COPY src/ ./src/
-# Move main back out to app root based on structure if needed, or leave in src
-# According to main.py path, it looks for src.* imports
-# The main.py should be in /app/main.py
+# Copy the rest of the application code
+COPY . .
 
-RUN mv /app/src/main.py /app/main.py 2>/dev/null || true
+# Create directories for volumes
+RUN mkdir -p /app/data /app/logs /app/models /app/reports
 
-RUN chown -R quantuser:quantuser /app
-
-USER quantuser
-
-ENV PYTHONPATH=/app
-
+# Run the bot
 CMD ["python", "main.py"]

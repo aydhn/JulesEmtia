@@ -1,88 +1,34 @@
-import yfinance as yf
-import logging
-import pandas as pd
-import asyncio
+import numpy as np
+from src.config import VIX_THRESHOLD, Z_SCORE_THRESHOLD
+from src.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
-class MacroFilter:
+def check_circuit_breaker(macro_data: dict) -> bool:
     """
-    Phase 19: Black Swan, VIX Circuit Breaker, Flash Crash (Z-Score)
-    Phase 6: Macro Regime (DXY, Yields)
+    Returns True if a VIX Black Swan event is detected, meaning no new trades should be opened.
     """
-    def __init__(self, vix_threshold: float = 35.0, z_score_threshold: float = 4.0):
-        self.vix_threshold = vix_threshold
-        self.z_score_threshold = z_score_threshold
-        self.macro_data = {}
+    vix = macro_data.get("VIX", 0.0)
+    if vix > VIX_THRESHOLD:
+        logger.warning(f"🚨 CIRCUIT BREAKER TRIGGERED! VIX is {vix:.2f} > {VIX_THRESHOLD}. Halting new entries.")
+        return True
+    return False
 
-    def is_black_swan(self) -> bool:
-        """Checks VIX for extreme panic conditions."""
-        try:
-            vix = yf.download("^VIX", period="5d", progress=False)['Close'].iloc[-1]
-            vix_val = float(vix.iloc[0]) if hasattr(vix, "iloc") else float(vix)
-            if vix_val > self.vix_threshold:
-                logger.critical(f"BLACK SWAN ALERT! VIX = {vix_val:.2f}. Suspending new trades.")
-                return True
-        except Exception as e:
-            logger.warning(f"Failed to check VIX: {e}")
+def check_flash_crash(df, z_threshold=Z_SCORE_THRESHOLD) -> bool:
+    """
+    Checks for sudden price anomalies using rolling Z-Score.
+    Returns True if an anomaly is detected.
+    """
+    if len(df) < 50:
         return False
 
-    def is_flash_crash(self, ltf_df: pd.DataFrame) -> bool:
-        """Checks if current price deviated abnormally (4+ std dev) from recent mean."""
-        if ltf_df is None or len(ltf_df) < 50:
-            return False
+    mean = df['Close'].rolling(window=50).mean().iloc[-1]
+    std = df['Close'].rolling(window=50).std().iloc[-1]
+    current_price = df['Close'].iloc[-1]
 
-        try:
-            closes = ltf_df['Close']
-            mean = float(closes.rolling(window=50).mean().iloc[-1])
-            std = float(closes.rolling(window=50).std().iloc[-1])
-            current = float(closes.iloc[-1])
-
-            if std == 0: return False
-
-            z_score = (current - mean) / std
-            if abs(z_score) >= self.z_score_threshold:
-                logger.critical(f"FLASH CRASH DETECTED! Z-Score = {z_score:.2f}")
-                return True
-        except Exception as e:
-            logger.warning(f"Z-Score calculation failed: {e}")
-
-        return False
-
-    async def fetch_macro_data(self):
-        """Fetches DXY and 10Y Yields for regime filter."""
-        try:
-            dxy = await asyncio.to_thread(yf.download, "DX-Y.NYB", period="100d", progress=False)
-            tnx = await asyncio.to_thread(yf.download, "^TNX", period="100d", progress=False)
-            self.macro_data = {"DXY": dxy, "TNX": tnx}
-        except Exception as e:
-            logger.warning(f"Failed to fetch macro data: {e}")
-
-    def get_regime_veto(self, direction: str, category: str) -> bool:
-        """Vetos LONGs in Metals/EM if DXY and Yields are strongly rising."""
-        if category.upper() not in ["METALS", "FOREX", "AGRI"]:
-            return False
-
-        dxy = self.macro_data.get("DXY")
-        tnx = self.macro_data.get("TNX")
-
-        if dxy is None or tnx is None or dxy.empty or tnx.empty:
-            return False
-
-        try:
-            dxy_close = float(dxy['Close'].iloc[-1].iloc[0] if hasattr(dxy['Close'].iloc[-1], "iloc") else dxy['Close'].iloc[-1])
-            dxy_sma = float(dxy['Close'].rolling(50).mean().iloc[-1].iloc[0] if hasattr(dxy['Close'].rolling(50).mean().iloc[-1], "iloc") else dxy['Close'].rolling(50).mean().iloc[-1])
-
-            tnx_close = float(tnx['Close'].iloc[-1].iloc[0] if hasattr(tnx['Close'].iloc[-1], "iloc") else tnx['Close'].iloc[-1])
-            tnx_sma = float(tnx['Close'].rolling(50).mean().iloc[-1].iloc[0] if hasattr(tnx['Close'].rolling(50).mean().iloc[-1], "iloc") else tnx['Close'].rolling(50).mean().iloc[-1])
-
-            dxy_uptrend = dxy_close > dxy_sma
-            tnx_uptrend = tnx_close > tnx_sma
-
-            if dxy_uptrend and tnx_uptrend and direction == "LONG":
-                logger.warning(f"Macro Veto! DXY and TNX rising. Rejecting {category} LONG.")
-                return True
-        except Exception as e:
-            logger.warning(f"Regime veto calculation failed: {e}")
-
-        return False
+    if std > 0:
+        z_score = (current_price - mean) / std
+        if abs(z_score) > z_threshold:
+            logger.warning(f"🚨 FLASH CRASH DETECTED! Z-Score: {z_score:.2f}")
+            return True
+    return False

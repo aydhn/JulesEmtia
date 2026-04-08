@@ -1,108 +1,96 @@
-import pandas as pd
-import numpy as np
-import logging
 import os
 import joblib
+import pandas as pd
+import numpy as np
 from sklearn.ensemble import RandomForestClassifier
+from src.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger()
+MODEL_PATH = "models/rf_model.pkl"
 
-class MLValidator:
+def create_labels(df: pd.DataFrame, horizon: int = 5, tp_mult: float = 1.0, sl_mult: float = 0.5):
     """
-    Phase 18: Random Forest Classifier for Signal Validation & Auto-Retraining
+    Creates target labels for ML training. 1 if hit TP before SL within 'horizon', 0 otherwise.
+    Strictly avoids lookahead bias by shifting target calculations backwards, then dropping NaNs.
     """
-    def __init__(self, model_path: str = "models/rf_model.pkl", probability_threshold: float = 0.60):
-        self.model_path = model_path
-        self.probability_threshold = probability_threshold
-        self.model = self._load_model()
+    labels = np.zeros(len(df))
+    for i in range(len(df) - horizon):
+        entry_price = df['Close'].iloc[i]
+        atr = df['ATR_14'].iloc[i] if 'ATR_14' in df.columns else entry_price * 0.01
 
-    def _load_model(self):
-        if os.path.exists(self.model_path):
-            try:
-                return joblib.load(self.model_path)
-            except Exception as e:
-                logger.warning(f"Failed to load ML model: {e}")
+        # Simplified simulation for Long labeling
+        tp = entry_price + (atr * tp_mult)
+        sl = entry_price - (atr * sl_mult)
 
-        # Initialize a new robust RF model if not exists
-        return RandomForestClassifier(
-            n_estimators=100,
-            max_depth=5,
-            min_samples_split=10,
-            random_state=42,
-            n_jobs=-1
-        )
+        success = 0
+        for j in range(1, horizon + 1):
+            if df['High'].iloc[i+j] >= tp:
+                success = 1
+                break
+            if df['Low'].iloc[i+j] <= sl:
+                success = 0
+                break
+        labels[i] = success
 
-    def _create_labels(self, df: pd.DataFrame, lookforward: int = 10, profit_target: float = 0.02) -> pd.DataFrame:
-        """Labels historical data: 1 if hit profit target before stop, 0 otherwise."""
-        df = df.copy()
-        df['Target_Met'] = 0
+    df['Target'] = labels
+    # Drop last 'horizon' rows as we can't know their future outcome
+    return df.iloc[:-horizon].copy()
 
-        # Vectorized check for future highest/lowest
-        future_highs = df['High'].shift(-lookforward).rolling(window=lookforward, min_periods=1).max()
-        future_lows = df['Low'].shift(-lookforward).rolling(window=lookforward, min_periods=1).min()
+def train_model(historical_df: pd.DataFrame):
+    """
+    Trains a Random Forest model on historical data.
+    """
+    os.makedirs("models", exist_ok=True)
+    if len(historical_df) < 500:
+        logger.warning("Not enough data to train ML model.")
+        return
 
-        long_success = future_highs >= df['Close'] * (1 + profit_target)
-        short_success = future_lows <= df['Close'] * (1 - profit_target)
+    features = ['RSI_14', 'ATR_14', 'Log_Ret']
+    # Add MACD histograms if present (pandas_ta generates dynamic names, finding them safely)
+    macd_cols = [c for c in historical_df.columns if c.startswith('MACDh')]
+    if macd_cols:
+        features.append(macd_cols[0])
 
-        # Naive labeling for training purposes
-        df.loc[long_success | short_success, 'Target_Met'] = 1
+    df = create_labels(historical_df)
+    df.dropna(subset=features + ['Target'], inplace=True)
 
-        return df.dropna()
+    X = df[features]
+    y = df['Target']
 
-    def train(self, all_data: pd.DataFrame):
-        """Phase 18: Otonom Yeniden Eğitim (Auto-Retraining)."""
-        logger.info("Starting ML Retraining...")
-        try:
-            labeled_data = self._create_labels(all_data)
+    model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
+    model.fit(X, y)
 
-            # Select feature columns (exclude dates, targets, open/high/low etc)
-            feature_cols = [c for c in labeled_data.columns if c not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Date', 'Target_Met'] and not c.startswith('Bullish') and not c.startswith('Bearish')]
+    joblib.dump(model, MODEL_PATH)
+    logger.info(f"ML Model trained and saved to {MODEL_PATH}")
 
-            X = labeled_data[feature_cols].fillna(0)
-            y = labeled_data['Target_Met']
+def validate_signal(current_features: pd.Series, threshold: float = 0.55) -> bool:
+    """
+    Validates a signal using the trained ML model. Returns True if probability > threshold.
+    """
+    if not os.path.exists(MODEL_PATH):
+        logger.warning("ML Model not found. Bypassing ML validation.")
+        return True # Bypass if no model
 
-            if len(X) < 100:
-                logger.warning("Not enough data to train ML model.")
-                return
+    try:
+        model = joblib.load(MODEL_PATH)
+        features = ['RSI_14', 'ATR_14', 'Log_Ret']
+        macd_cols = [c for c in current_features.index if c.startswith('MACDh')]
 
-            self.model.fit(X, y)
+        input_data = []
+        for f in features:
+            input_data.append(current_features.get(f, 0.0))
+        if macd_cols:
+             input_data.append(current_features.get(macd_cols[0], 0.0))
 
-            os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
-            joblib.dump(self.model, self.model_path)
-            logger.info("ML Model successfully retrained and saved.")
-        except Exception as e:
-            logger.error(f"ML Training failed: {e}")
+        # Reshape for single prediction
+        X_test = np.array(input_data).reshape(1, -1)
+        prob = model.predict_proba(X_test)[0][1] # Prob of class 1
 
-    def validate_signal(self, current_features: pd.DataFrame, direction: str) -> bool:
-        """Validates if the signal has a high probability of success."""
-        if not hasattr(self.model, "classes_"):
-            # Model not trained yet, pass-through
+        if prob >= threshold:
             return True
-
-        try:
-            feature_cols = [c for c in current_features.columns if c not in ['Open', 'High', 'Low', 'Close', 'Volume', 'Date', 'Target_Met'] and not c.startswith('Bullish') and not c.startswith('Bearish')]
-
-            X_curr = current_features.iloc[-1:][feature_cols].fillna(0)
-
-            # Use align to handle missing feature columns by filling with 0 (helps if feature set changed slightly)
-            if hasattr(self.model, "feature_names_in_"):
-                expected_cols = self.model.feature_names_in_
-                for col in expected_cols:
-                    if col not in X_curr.columns:
-                        X_curr[col] = 0.0
-                X_curr = X_curr[expected_cols]
-
-            prob = self.model.predict_proba(X_curr)[0]
-            # Assuming class 1 is success
-            success_prob = prob[1] if len(prob) > 1 else prob[0]
-
-            if success_prob < self.probability_threshold:
-                logger.warning(f"ML Veto! Signal success probability ({success_prob:.2f}) below threshold.")
-                return False
-
-            logger.info(f"ML Validation Passed (Prob: {success_prob:.2f})")
-            return True
-
-        except Exception as e:
-            logger.error(f"ML Validation error: {e}")
-            return True # Fail-safe, don't block if ML errors out
+        else:
+            logger.info(f"ML Veto: Signal rejected. Probability {prob:.2f} < {threshold}")
+            return False
+    except Exception as e:
+        logger.error(f"Error in ML validation: {e}")
+        return True # Fallback to True if error
