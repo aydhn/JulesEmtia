@@ -1,8 +1,8 @@
 pandas==2.1.4
-numpy==1.26.2
+numpy
 yfinance==0.2.33
-# pandas-ta==0.3.14b0
-# pandas-ta workaround for newer python
+# pandas-ta==0.3.14b
+# pandas-ta==0.3.14b workaround for newer python
 python-telegram-bot==20.7
 scikit-learn==1.3.2
 nltk==3.8.1
@@ -14,4 +14,4 @@ jinja2==3.1.2
 asyncio==3.4.3
 tzdata==2023.3
 python-dotenv==1.0.0
-pandas-ta==0.3.14b0
+pandas-ta==0.3.14b
