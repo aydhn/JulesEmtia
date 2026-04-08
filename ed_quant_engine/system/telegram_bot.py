@@ -1,7 +1,9 @@
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from core.config import TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID
 import asyncio
+import sqlite3
+import pandas as pd
+from core.config import TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID
 from system.logger import log
 
 class TelegramManager:
@@ -28,17 +30,25 @@ class TelegramManager:
 
         @admin_only
         async def cmd_durum(update, context):
-            import sqlite3
-            import pandas as pd
             try:
-                conn = sqlite3.connect("paper_db.sqlite3")
-                df = pd.read_sql_query("SELECT * FROM trades WHERE status='OPEN'", conn)
+                conn = sqlite3.connect("data/paper_db.sqlite3")
+                df = pd.read_sql_query("SELECT * FROM trades WHERE status='Open'", conn)
+
+                cursor = conn.cursor()
+                cursor.execute("SELECT current_balance FROM balance WHERE id=1")
+                bal_row = cursor.fetchone()
+                balance = bal_row[0] if bal_row else 0.0
+
                 open_pos_count = len(df)
                 conn.close()
-            except:
-                open_pos_count = 0
 
-            await update.message.reply_text(f"📊 Açık Pozisyon: {open_pos_count}\nDurum: {'DURAKLATILDI' if self.is_paused else 'AKTİF'}")
+                msg = f"📊 *ED Capital Durum*\nBakiye: ${balance:,.2f}\nAçık Pozisyon: {open_pos_count}\nDurum: {'DURAKLATILDI' if self.is_paused else 'AKTİF'}\n"
+                for _, row in df.iterrows():
+                    msg += f"• {row['ticker']} {row['direction']} (Giriş: {row['entry_price']:.4f})\n"
+                await update.message.reply_text(msg, parse_mode='Markdown')
+            except Exception as e:
+                log.error(f"Status Error: {e}")
+                await update.message.reply_text("❌ Durum alınamadı.")
 
         @admin_only
         async def cmd_durdur(update, context):
@@ -53,10 +63,12 @@ class TelegramManager:
         @admin_only
         async def cmd_kapat_hepsi(update, context):
             # Panic Button - close all immediately
-            from core.data_engine import db
+            from core.infrastructure import PaperDB
             import yfinance as yf
 
-            open_pos = db.get_open_positions()
+            db = PaperDB()
+            open_pos = db.get_open_trades()
+
             if open_pos.empty:
                 await update.message.reply_text("Açık pozisyon yok.")
                 return
@@ -70,9 +82,15 @@ class TelegramManager:
 
                     # Fetch current price quickly
                     curr_p = yf.download(t, period="1d", interval="1m", progress=False)['Close'].iloc[-1]
-                    pnl = (curr_p - e_p) * size if dir == 'LONG' else (e_p - curr_p) * size
+                    pnl = (curr_p - e_p) * size if dir == 'Long' else (e_p - curr_p) * size
 
-                    db.close_trade(tid, curr_p, pnl)
+                    with db._get_conn() as conn:
+                        conn.execute("UPDATE trades SET status = 'Closed', exit_time = datetime('now'), exit_price = ?, pnl = ? WHERE trade_id = ?", (curr_p, pnl, tid))
+                        conn.commit()
+
+                    new_balance = db.get_balance() + pnl
+                    db.update_balance(new_balance)
+
                     log.critical(f"PANIC CLOSE: {t} kapandı. PnL: {pnl:.2f}")
                 except Exception as e:
                     log.error(f"Failed to panic close {t}: {e}")
@@ -105,7 +123,7 @@ class TelegramManager:
     async def send_msg(self, text: str):
         if self.app and ADMIN_CHAT_ID:
             try:
-                await self.app.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
+                await self.app.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text, parse_mode='Markdown')
             except Exception as e:
                 log.error(f"Telegram Send Error: {e}")
 
