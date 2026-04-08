@@ -1,208 +1,237 @@
 import asyncio
 import schedule
-import time
-import os
+import logging
+from datetime import datetime
 import gc
 import traceback
 import pandas as pd
-from datetime import datetime
+import os
 
-# Import ED Capital modules
-from core.config import TICKERS
-from core.infrastructure import db, PaperBroker, logger
-from core.data_engine import DataEngine
-from core.ai_filters import SentimentEngine, MLValidator
-from core.risk_manager import RiskManager
-from core.quant_logic import Strategy
-from core.reporter import Reporter
-from system.telegram_bot import tg
+from src.broker import PaperBroker
+from src.data_engine import DataEngine
+from src.macro_filter import MacroFilter
+from src.sentiment_filter import SentimentEngine
+from src.portfolio_manager import PortfolioManager
+from src.execution import ExecutionModel
+from src.features import calculate_mtf_features
+from src.strategy import Strategy
+from src.notifier import tg_bot
+from src.config import TICKERS
 
-class QuantEngine:
+# Newly added modules
+from src.ml_validator import MLValidator
+from src.reporter import Reporter
+from src.monte_carlo import MonteCarloSimulator
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("quant_engine.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("QuantEngine")
+
+class EDQuantEngine:
     def __init__(self):
-        self.db = db
-        self.broker = PaperBroker(self.db)
+        self.broker = PaperBroker()
         self.data_engine = DataEngine(TICKERS)
+        self.macro = MacroFilter()
         self.sentiment = SentimentEngine()
-        self.risk_manager = RiskManager(self.db)
+        self.portfolio = PortfolioManager(self.broker)
+        self.execution = ExecutionModel()
+
+        # Phase 18: ML Validator
         self.ml_validator = MLValidator()
 
-    async def run_live_cycle(self):
+        # Phase 13 & 22: Reporting & Risk
+        self.reporter = Reporter()
+        self.monte_carlo = MonteCarloSimulator()
+
+    async def get_status_report(self) -> str:
+        bal = self.broker.get_account_balance()
+        open_pos = self.broker.get_open_positions()
+        pos_str = "\n".join([f"• {p['ticker']} {p['direction']} (Pnl: {p['pnl']:.2f})" for p in open_pos]) if open_pos else "Yok"
+
+        # Add Monte Carlo Risk of Ruin to status if possible
+        mc_res = self.monte_carlo.run_simulation()
+        risk_str = f"İflas Riski: %{mc_res.get('risk_of_ruin', 0)*100:.2f}" if "error" not in mc_res else "Risk Verisi Yetersiz"
+
+        return f"🟢 ED Capital Durum\nKasa: ${bal:,.2f}\n{risk_str}\nAçık Pozisyonlar ({len(open_pos)}):\n{pos_str}"
+
+    async def panic_close_all(self):
+        open_pos = self.broker.get_open_positions()
+        for pos in open_pos:
+            self.broker.close_position(pos['trade_id'], pos['exit_price'] if pos['exit_price'] else pos['entry_price'])
+        await tg_bot.send_message("🚨 Tüm pozisyonlar acil durum protokolüyle piyasa fiyatından kapatıldı.")
+
+    async def generate_weekly_report(self):
+        """Phase 13: Generate Tear Sheet and send via Telegram."""
+        logger.info("Generating weekly Tear Sheet...")
         try:
-            logger.info("Starting live cycle pipeline...")
+            report_path = self.reporter.generate_tear_sheet()
+            if os.path.exists(report_path):
+                await tg_bot.send_document(report_path, "ED Capital - Haftalık Piyasa Genel Bakış")
+        except Exception as e:
+            logger.error(f"Report generation failed: {e}")
 
-            if tg.is_paused:
-                logger.info("System is paused. Skipping signal generation, only managing open positions.")
-
-            # 1. Fetch MTF Data
-            htf_ltf_dict = {}
+    async def run_ml_retraining(self):
+        """Phase 18: Autonomous ML Retraining."""
+        logger.info("Starting weekly ML retraining process...")
+        try:
+            all_historical_data = pd.DataFrame()
             for ticker in self.data_engine.all_tickers:
                 htf, ltf = await self.data_engine.fetch_mtf_data(ticker)
-                if htf is not None and ltf is not None:
-                    htf_ltf_dict[ticker] = {"htf": htf, "ltf": ltf}
+                if not htf.empty and not ltf.empty:
+                    merged = calculate_mtf_features(htf, ltf)
+                    all_historical_data = pd.concat([all_historical_data, merged])
 
-            if not htf_ltf_dict:
-                logger.warning("No data fetched. Aborting cycle.")
+            if not all_historical_data.empty:
+                self.ml_validator.train(all_historical_data)
+                await tg_bot.send_message("🧠 *Makine Öğrenmesi Modeli (Random Forest) başarıyla yeniden eğitildi.*")
+        except Exception as e:
+            logger.error(f"ML retraining failed: {e}")
+
+    async def run_live_cycle(self):
+        logger.info("Starting live evaluation cycle...")
+        try:
+            if tg_bot.is_paused:
+                logger.info("System is Paused. Skipping new signals.")
+
+            await self.macro.fetch_macro_data()
+            is_black_swan = self.macro.is_black_swan()
+
+            htf_ltf = {}
+            for ticker in self.data_engine.all_tickers:
+                htf, ltf = await self.data_engine.fetch_mtf_data(ticker)
+                if not htf.empty and not ltf.empty:
+                    htf_ltf[ticker] = {"htf": htf, "ltf": ltf}
+
+            if not htf_ltf: return
+
+            # Manage Open Positions
+            open_pos = self.broker.get_open_positions()
+            for pos in open_pos:
+                ticker = pos['ticker']
+                if ticker not in htf_ltf: continue
+
+                curr_price = htf_ltf[ticker]['ltf']['Close'].iloc[-1]
+                atr = htf_ltf[ticker]['ltf'].get('ATR_14', pd.Series([curr_price * 0.01])).iloc[-1]
+
+                # Check Circuit Breakers
+                if is_black_swan or self.macro.is_flash_crash(htf_ltf[ticker]['ltf']):
+                    self.broker.close_position(pos['trade_id'], curr_price)
+                    await tg_bot.send_message(f"🚨 CIRCUIT BREAKER: Closed {ticker}")
+                    continue
+
+                # TP / SL Check
+                if (pos['direction'] == "LONG" and (curr_price <= pos['sl_price'] or curr_price >= pos['tp_price'])) or \
+                   (pos['direction'] == "SHORT" and (curr_price >= pos['sl_price'] or curr_price <= pos['tp_price'])):
+                    res = self.broker.close_position(pos['trade_id'], curr_price)
+                    await tg_bot.send_message(f"🔒 İŞLEM KAPANDI: {ticker} (PnL: {res.get('pnl', 0):.2f})")
+                    continue
+
+                # Trailing Stop & Breakeven Check
+                new_sl = pos['sl_price']
+                if pos['direction'] == "LONG":
+                    if curr_price >= pos['entry_price'] + (1.0 * atr) and pos['sl_price'] < pos['entry_price']:
+                        new_sl = pos['entry_price']
+                    calc_sl = curr_price - (1.5 * atr)
+                    if calc_sl > new_sl: new_sl = calc_sl
+                else:
+                    if curr_price <= pos['entry_price'] - (1.0 * atr) and pos['sl_price'] > pos['entry_price']:
+                        new_sl = pos['entry_price']
+                    calc_sl = curr_price + (1.5 * atr)
+                    if calc_sl < new_sl: new_sl = calc_sl
+
+                if new_sl != pos['sl_price']:
+                    self.broker.modify_trailing_stop(pos['trade_id'], new_sl)
+
+            if tg_bot.is_paused or is_black_swan:
                 return
 
-            # 2. VIX Circuit Breaker & Macro
-            is_black_swan = self.risk_manager.check_black_swan()
-            macro_data = await self.data_engine.fetch_macro_data()
-
-            current_prices = {}
-            current_atrs = {}
-
-            from core.quant_models import add_features
-
-            for t, data in htf_ltf_dict.items():
-                ltf = data['ltf']
-                if len(ltf) > 0:
-                    current_prices[t] = ltf['Close'].iloc[-1]
-                    current_atrs[t] = current_prices[t] * 0.01 # Approximation if not calculated
-
-            # --- POSITION MANAGEMENT ---
-            self.risk_manager.manage_positions(self.broker, current_prices, current_atrs, is_black_swan)
-
-            if tg.is_paused or is_black_swan:
-                return
-
-            # NLP Sentiment Cache
-            for cat in TICKERS.keys():
-                await self.sentiment.fetch_sentiment(cat)
-
-            # Correlation matrix requires historical closes
             corr_df = pd.DataFrame()
-            for t, data in htf_ltf_dict.items():
-                if len(data['ltf']) > 0:
-                    corr_df[t] = data['ltf']['Close'].tail(50)
+            for t, data in htf_ltf.items():
+                corr_df[t] = data['ltf']['Close'].tail(30)
             corr_matrix = corr_df.corr()
 
-            # --- SIGNAL GENERATION ---
-            current_balance = self.db.get_balance()
+            for category in TICKERS.keys():
+                await self.sentiment.fetch_sentiment(category)
 
-            for ticker, data in htf_ltf_dict.items():
-                # Check Flash Crash
-                if self.risk_manager.check_z_score_anomaly(ticker, data['ltf']):
-                    continue
+            current_balance = self.broker.get_account_balance()
+            kelly_fraction = self.portfolio.calculate_kelly_fraction()
 
-                signal_data = Strategy.generate_signal(data['htf'], data['ltf'])
-                if not signal_data:
-                    continue
+            for ticker, data in htf_ltf.items():
+                if self.macro.is_flash_crash(data['ltf']): continue
 
-                direction = signal_data['dir']
-                curr_p = signal_data['price']
-                atr = signal_data['atr']
+                merged_features = calculate_mtf_features(data['htf'], data['ltf'])
+                signal = Strategy.generate_signal(merged_features)
+
+                if not signal: continue
+                direction = signal['dir']
+                curr_price = signal['price']
+                atr = signal['atr']
 
                 cat = next((k for k, v in TICKERS.items() if ticker in v), "FOREX")
 
-                # 0. Macro Veto
-                if self.risk_manager.check_macro_veto(direction, cat, macro_data):
-                    continue
+                # Phase 6: Macro Regime Veto
+                if self.macro.get_regime_veto(direction, cat): continue
+                # Phase 18: ML Validator Veto
+                if not self.ml_validator.validate_signal(merged_features, direction): continue
+                # Phase 20: Sentiment Veto
+                if self.sentiment.get_sentiment_veto(direction, cat): continue
+                # Phase 11: Correlation Veto
+                if self.portfolio.check_correlation_veto(ticker, direction, corr_matrix): continue
 
-                # 1. ML Validator
-                htf_f = add_features(data['htf'].copy())
-                ltf_f = add_features(data['ltf'].copy())
+                risk_amount = current_balance * kelly_fraction
+                lot_size = risk_amount / (1.5 * atr)
 
-                if htf_f.empty or ltf_f.empty: continue
+                if lot_size <= 0: continue
 
-                htf_shifted = htf_f.shift(1).reset_index()
-                ltf_reset = ltf_f.reset_index()
-                if 'Date' not in ltf_reset.columns and 'Datetime' in ltf_reset.columns:
-                    ltf_reset.rename(columns={'Datetime': 'Date'}, inplace=True)
-                if 'Date' not in htf_shifted.columns and 'Datetime' in htf_shifted.columns:
-                    htf_shifted.rename(columns={'Datetime': 'Date'}, inplace=True)
+                spread, slippage = self.execution.calculate_costs(ticker, cat, curr_price, atr)
 
-                merged_features = pd.merge_asof(ltf_reset, htf_shifted, on='Date', direction='backward', suffixes=('', '_HTF'))
+                sl = curr_price - (1.5 * atr) if direction == "LONG" else curr_price + (1.5 * atr)
+                tp = curr_price + (3.0 * atr) if direction == "LONG" else curr_price - (3.0 * atr)
 
-                if not self.ml_validator.validate_signal(merged_features, direction):
-                    continue
+                receipt = self.broker.place_market_order(ticker, direction, lot_size, curr_price, sl, tp, spread, slippage)
 
-                # 2. NLP Sentiment Veto
-                if self.sentiment.get_sentiment_veto(direction, cat):
-                    continue
+                await tg_bot.send_message(
+                    f"🚀 *YENİ İŞLEM*\n"
+                    f"Varlık: {ticker}\n"
+                    f"Yön: {direction}\n"
+                    f"Giriş: {receipt['executed_price']:.4f}\n"
+                    f"SL: {sl:.4f} | TP: {tp:.4f}\n"
+                    f"Lot: {lot_size:.4f} (Risk: %{kelly_fraction*100:.2f})"
+                )
 
-                # 3. Correlation & Exposure Veto
-                if not self.risk_manager.check_portfolio_limits(ticker, direction, corr_matrix):
-                    continue
-
-                # 4. Sizing & Execution
-                if direction == 'LONG':
-                    sl = curr_p - (1.5 * atr)
-                    tp = curr_p + (3.0 * atr)
-                else:
-                    sl = curr_p + (1.5 * atr)
-                    tp = curr_p - (3.0 * atr)
-
-                # Kelly sizing
-                size = self.risk_manager.calculate_position_size(curr_p, atr, current_balance)
-                if size <= 0: continue
-
-                # Spread / Slippage
-                spread, slippage = self.risk_manager.dynamic_spread_slippage(ticker, curr_p, atr)
-
-                # Execute!
-                self.broker.place_market_order(ticker, direction, size, sl, tp, curr_p, spread, slippage)
-                await tg.send_msg(f"🚀 *YENİ İŞLEM*\nTicker: {ticker}\nYön: {direction}\nFiyat: {curr_p:.4f}\nSL: {sl:.4f} | TP: {tp:.4f}\nLot: {size:.4f}")
-
-            # Garbage Collection
-            del htf_ltf_dict
+        except Exception as e:
+            logger.error(f"Live cycle error: {e}\n{traceback.format_exc()}")
+        finally:
+            del htf_ltf
             gc.collect()
-            logger.info("Cycle complete.")
 
-        except Exception as e:
-            logger.error(f"Error in live cycle: {e}\n{traceback.format_exc()}")
-            await tg.send_msg(f"⚠️ *System Error*: {e}")
+async def main_loop():
+    engine = EDQuantEngine()
 
-    async def heartbeat(self):
-        bal = self.broker.get_account_balance()
-        open_pos = len(self.db.get_open_trades())
-        await tg.send_msg(f"🟢 *ED Capital Sistem Aktif*\nBakiye: ${bal:,.2f}\nAçık Pozisyonlar: {open_pos}")
+    await tg_bot.start_polling(
+        get_status_cb=engine.get_status_report,
+        close_all_cb=engine.panic_close_all,
+        scan_cb=engine.run_live_cycle
+    )
 
-    async def generate_report(self):
-        logger.info("Generating weekly report...")
-        reporter = Reporter(self.db)
-        report_path = reporter.generate_tear_sheet()
-        if os.path.exists(report_path):
-            await tg.send_document(report_path, "ED Capital Haftalık Performans Raporu")
-        else:
-            await tg.send_msg(f"Rapor Hatası: {report_path}")
+    await tg_bot.send_message("🟢 *ED Capital Quant Engine* başlatıldı.")
 
-    async def train_ml_model(self):
-        """Phase 18: Otonom Yeniden Eğitim (Auto-Retraining)."""
-        logger.info("Starting weekly ML retraining...")
-        try:
-            # Gather data for training
-            all_data = pd.DataFrame()
-            for ticker in self.data_engine.all_tickers:
-                htf, ltf = await self.data_engine.fetch_mtf_data(ticker)
-                if ltf is not None and not ltf.empty:
-                    from core.quant_models import add_features
-                    feat = add_features(ltf.copy())
-                    all_data = pd.concat([all_data, feat])
+    # Phase 23: Candle-Close Synchronization Scheduling
+    schedule.every().hour.at(":01").do(lambda: asyncio.create_task(engine.run_live_cycle()))
+    # Phase 13: Weekly Tear Sheet Reporting
+    schedule.every().friday.at("23:00").do(lambda: asyncio.create_task(engine.generate_weekly_report()))
+    # Phase 18: Weekly Auto-Retraining
+    schedule.every().sunday.at("02:00").do(lambda: asyncio.create_task(engine.run_ml_retraining()))
 
-            if not all_data.empty:
-                self.ml_validator.train(all_data)
-                await tg.send_msg("🧠 *ML Modeli Başarıyla Yeniden Eğitildi.*")
-        except Exception as e:
-            logger.error(f"ML Retraining Error: {e}")
-
-    async def run_bot(self):
-        # Initialize Telegram
-        await tg.start(run_live_cycle_ref=self.run_live_cycle)
-        await tg.send_msg("🚀 ED Capital Quant Engine Başlatıldı!")
-
-        # Async scheduling loop
-        schedule.every().hour.at(":01").do(lambda: asyncio.create_task(self.run_live_cycle()))
-        schedule.every().day.at("08:00").do(lambda: asyncio.create_task(self.heartbeat()))
-        schedule.every().friday.at("23:00").do(lambda: asyncio.create_task(self.generate_report()))
-        schedule.every().sunday.at("02:00").do(lambda: asyncio.create_task(self.train_ml_model()))
-
-        while True:
-            schedule.run_pending()
-            await asyncio.sleep(1)
+    while True:
+        schedule.run_pending()
+        await asyncio.sleep(1)
 
 if __name__ == "__main__":
-    engine = QuantEngine()
-    try:
-        asyncio.run(engine.run_bot())
-    except KeyboardInterrupt:
-        logger.info("System shutting down manually.")
+    asyncio.run(main_loop())
