@@ -55,9 +55,21 @@ def calculate_mtf_features(htf_df: pd.DataFrame, ltf_df: pd.DataFrame) -> pd.Dat
         if macd_ltf is not None and not macd_ltf.empty:
             ltf_df = pd.concat([ltf_df, macd_ltf], axis=1)
 
+
         bbands = ta.bbands(ltf_df['Close'])
         if bbands is not None and not bbands.empty:
             ltf_df = pd.concat([ltf_df, bbands], axis=1)
+
+        # Stochastic
+        stoch = ta.stoch(ltf_df['High'], ltf_df['Low'], ltf_df['Close'])
+        if stoch is not None and not stoch.empty:
+            ltf_df = pd.concat([ltf_df, stoch], axis=1)
+
+        # OBV
+        obv = ta.obv(ltf_df['Close'], ltf_df['Volume'])
+        if obv is not None and not obv.empty:
+            ltf_df = pd.concat([ltf_df, obv], axis=1)
+
 
         # Uyumsuzluk (Divergence) Detection (RSI & MACD)
         ltf_df['Price_Diff'] = ltf_df['Close'].diff(periods=10)
@@ -67,10 +79,19 @@ def calculate_mtf_features(htf_df: pd.DataFrame, ltf_df: pd.DataFrame) -> pd.Dat
             ltf_df['Bullish_Div_RSI'] = (ltf_df['Price_Diff'] < 0) & (rsi_diff > 0) & (ltf_df['RSI_14'] < 40)
             ltf_df['Bearish_Div_RSI'] = (ltf_df['Price_Diff'] > 0) & (rsi_diff < 0) & (ltf_df['RSI_14'] > 60)
 
+
         if 'MACDh_12_26_9' in ltf_df.columns:
             macd_diff = ltf_df['MACDh_12_26_9'].diff(periods=10)
             ltf_df['Bullish_Div_MACD'] = (ltf_df['Price_Diff'] < 0) & (macd_diff > 0) & (ltf_df['MACDh_12_26_9'] < 0)
             ltf_df['Bearish_Div_MACD'] = (ltf_df['Price_Diff'] > 0) & (macd_diff < 0) & (ltf_df['MACDh_12_26_9'] > 0)
+
+        stoch_k_col = [c for c in ltf_df.columns if c.startswith('STOCHk_')]
+        if stoch_k_col:
+            stoch_k = ltf_df[stoch_k_col[0]]
+            stoch_diff = stoch_k.diff(periods=10)
+            ltf_df['Bullish_Div_Stoch'] = (ltf_df['Price_Diff'] < 0) & (stoch_diff > 0) & (stoch_k < 20)
+            ltf_df['Bearish_Div_Stoch'] = (ltf_df['Price_Diff'] > 0) & (stoch_diff < 0) & (stoch_k > 80)
+
 
         # MTF Merge Process (backward direction to ensure we only get PAST data)
         ltf_reset = ltf_df.reset_index()

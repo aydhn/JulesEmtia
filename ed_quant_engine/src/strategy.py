@@ -42,13 +42,40 @@ class Strategy:
         ltf_macd_col = [c for c in mtf_df.columns if c.startswith('MACDh_') and not c.endswith('_HTF')]
         ltf_macd = prev_candle[ltf_macd_col[0]] if ltf_macd_col else 0
 
+        # Extract Stoch
+        stoch_k_col = [c for c in mtf_df.columns if c.startswith('STOCHk_') and not c.endswith('_HTF')]
+        stoch_k = prev_candle[stoch_k_col[0]] if stoch_k_col else 50
+
+        # Extract OBV and check trend
+        obv_col = [c for c in mtf_df.columns if c.startswith('OBV') and not c.endswith('_HTF')]
+        obv = prev_candle[obv_col[0]] if obv_col else 0
+
+        # Check if OBV is trending up/down using a simple assumption (we can't easily get previous candle's OBV from prev_candle, so we will do a basic check or just pass if not available)
+        # Actually, since prev_candle is a row, we can check if OBV is > 0, but usually OBV is cumulative. To check trend we need `mtf_df['OBV'].diff()`.
+        obv_trend_up = True
+        obv_trend_down = True
+        if obv_col and len(mtf_df) >= 3:
+            prev_obv = mtf_df.iloc[-3][obv_col[0]]
+            obv_trend_up = obv > prev_obv
+            obv_trend_down = obv < prev_obv
+
         # Divergences (If they exist)
         div_bull_rsi = prev_candle.get('Bullish_Div_RSI', False)
         div_bear_rsi = prev_candle.get('Bearish_Div_RSI', False)
 
-        # Base Conditions
-        ltf_bull_cond = (ltf_rsi < 35 or ltf_macd > 0 or div_bull_rsi) and ltf_close > ltf_ema50
-        ltf_bear_cond = (ltf_rsi > 65 or ltf_macd < 0 or div_bear_rsi) and ltf_close < ltf_ema50
+        div_bull_stoch = prev_candle.get('Bullish_Div_Stoch', False)
+        div_bear_stoch = prev_candle.get('Bearish_Div_Stoch', False)
+
+        div_bull_macd = prev_candle.get('Bullish_Div_MACD', False)
+        div_bear_macd = prev_candle.get('Bearish_Div_MACD', False)
+
+        # Base Conditions with Confluence
+        # Long requires: (RSI oversold OR MACD positive OR Stochastic oversold OR any bullish divergence) AND OBV trend up AND Close > EMA50
+        ltf_bull_cond = (ltf_rsi < 35 or ltf_macd > 0 or stoch_k < 20 or div_bull_rsi or div_bull_stoch or div_bull_macd) and obv_trend_up and (ltf_close > ltf_ema50)
+
+        # Short requires: (RSI overbought OR MACD negative OR Stochastic overbought OR any bearish divergence) AND OBV trend down AND Close < EMA50
+        ltf_bear_cond = (ltf_rsi > 65 or ltf_macd < 0 or stoch_k > 80 or div_bear_rsi or div_bear_stoch or div_bear_macd) and obv_trend_down and (ltf_close < ltf_ema50)
+
 
         atr_col = [c for c in mtf_df.columns if c.startswith('ATR_')]
         atr = prev_candle[atr_col[0]] if atr_col else ltf_close * 0.01
