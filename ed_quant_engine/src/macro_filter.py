@@ -7,16 +7,19 @@ class MacroFilter:
     def __init__(self):
         self.dxy_ticker = "DX-Y.NYB"
         self.tnx_ticker = "^TNX"
+        self.vix_ticker = "^VIX"
         self.benchmark_ticker = "USDTRY=X"
 
     async def fetch_macro_data(self) -> pd.DataFrame:
         try:
             dxy_df = await asyncio.to_thread(yf.download, tickers=self.dxy_ticker, period="1mo", interval="1d", progress=False)
             tnx_df = await asyncio.to_thread(yf.download, tickers=self.tnx_ticker, period="1mo", interval="1d", progress=False)
+            vix_df = await asyncio.to_thread(yf.download, tickers=self.vix_ticker, period="1mo", interval="1d", progress=False)
 
             macro_df = pd.DataFrame(index=dxy_df.index)
             macro_df['DXY'] = dxy_df['Close']
             macro_df['TNX'] = tnx_df['Close']
+            macro_df['VIX'] = vix_df['Close']
 
             macro_df = macro_df.ffill().dropna()
 
@@ -24,6 +27,7 @@ class MacroFilter:
             # For robustness, just check short term momentum if not enough data
             macro_df['DXY_SMA_5'] = macro_df['DXY'].rolling(window=5).mean()
             macro_df['TNX_SMA_5'] = macro_df['TNX'].rolling(window=5).mean()
+            macro_df['VIX_SMA_5'] = macro_df['VIX'].rolling(window=5).mean()
 
             return macro_df
         except Exception as e:
@@ -39,8 +43,11 @@ class MacroFilter:
 
         dxy_uptrend = last_row['DXY'] > last_row['DXY_SMA_5']
         tnx_uptrend = last_row['TNX'] > last_row['TNX_SMA_5']
+        vix_spike = last_row['VIX'] > 30 or last_row['VIX'] > (last_row['VIX_SMA_5'] * 1.2) # 20% spike
 
-        if dxy_uptrend and tnx_uptrend:
+        if vix_spike:
+            return "Black-Swan" # Circuit breaker active
+        elif dxy_uptrend and tnx_uptrend:
             return "Risk-Off" # Strong USD & Yields = Bad for risk assets/commodities
         elif not dxy_uptrend and not tnx_uptrend:
             return "Risk-On"  # Weak USD & Yields = Good for risk assets/commodities
@@ -52,6 +59,9 @@ class MacroFilter:
         Returns True if the signal should be vetoed based on macro regime.
         """
         # Ex: If Risk-Off (Strong USD), veto Longs on Gold/Silver/Emerging FX
+        if regime == "Black-Swan":
+            logger.warning(f"VIX Circuit Breaker: Rejected {direction} on {ticker}. VIX is spiking!")
+            return True
         if regime == "Risk-Off" and direction == "Long":
             logger.info(f"Macro Veto: Rejected {direction} on {ticker} due to Risk-Off regime (DXY & TNX rising).")
             return True
