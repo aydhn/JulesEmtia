@@ -1,17 +1,12 @@
-pandas
-numpy
-yfinance
-# pandas-ta
-# pandas-ta workaround for newer python
-python-telegram-bot==20.7
-scikit-learn
-nltk==3.8.1
+pandas==2.1.4
+numpy==1.26.4
+yfinance==0.2.36
+pandas-ta==0.3.14
+scikit-learn==1.4.0
 schedule==1.2.1
+python-telegram-bot==20.7
+matplotlib==3.8.2
+seaborn==0.13.2
 feedparser==6.0.11
-matplotlib
-seaborn
-jinja2==3.1.2
-asyncio==3.4.3
-tzdata==2023.3
-python-dotenv==1.0.0
-pandas-ta
+nltk==3.8.1
+SQLAlchemy==2.0.25

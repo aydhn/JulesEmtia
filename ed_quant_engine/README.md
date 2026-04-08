@@ -1,22 +1,24 @@
 # ED Capital Quant Engine
 
-## Mimarinin Amacı
-Düşük frekans (Low Frequency), yüksek isabet oranı (High Win-Rate) ve sıfır bütçe ile çalışan algoritmik bir işlem botudur. Makroekonomik veriler (DXY, ABD 10 Yıllık Tahvil Getirisi), Doğal Dil İşleme (NLP) ile Haber Duyarlılığı ve Makine Öğrenmesi (Random Forest) destekli "Çoklu Zaman Dilimi (MTF)" analizleri kullanır.
+ED Capital Quant Engine, düşük frekanslı (Low Frequency), yüksek isabet oranlı (High Win-Rate) algoritmik bir işlem (paper trading) botudur. Tamamen ücretsiz veri kaynakları (yfinance) kullanılarak, sıfır bütçeyle, modüler ve kurumsal mimari standartlarında geliştirilmiştir.
 
 ## Özellikler
-- **Sıfır Bütçe**: Açık kaynak kodlu ve ücretsiz kütüphaneler/API'ler kullanılır.
-- **MTF Uyumlu (Lookahead Bias Yok)**: Saatlik sinyaller günlük makro trendlerle filtrelenir.
-- **Dinamik Kasa Yönetimi**: Fractional Kelly Criterion kullanılarak portföy riski optimize edilir.
-- **Kapsamlı Veto Sistemleri**: Makro rejim, ML model vetosu, NLP duyarlılık vetosu ve varlıklar arası korelasyon vetoları içerir.
-- **Devre Kesici (Circuit Breaker)**: VIX sıçramalarına veya Z-Score anomalilerine karşı sistemi kilitler ve mevcut pozisyonları korur.
-- **Gerçekçi Simülasyon**: Slippage ve Spread oranları, strateji kârlılığını belirlerken fiyata eklendi.
 
-## Kurulum
-1. Repoyu klonlayın ve klasöre girin: `cd ed_quant_engine`
-2. `.env.example` dosyasını kopyalayın ve kendi bilgilerinizi girin: `cp .env.example .env`
-3. Tüm kütüphaneleri yükleyin: `pip install -r requirements.txt` (Dilerseniz VirtualEnv kullanın).
-4. `chmod +x manage_bot.sh` komutu ile yetkilendirin.
-5. Botu başlatın: `./manage_bot.sh start`
+* **Çoklu Zaman Dilimi (MTF) Analizi:** Günlük (1D) trend filtresi ve Saatlik (1H) tetikleyici ile lookahead bias'tan arındırılmış sinyal üretimi.
+* **Makroekonomik Filtreler:** DXY ve ABD 10 Yıllık Tahvil getirilerine dayalı piyasa rejimi (Risk-On/Off) tespiti ve Black Swan (VIX Devre Kesici) koruması.
+* **Makine Öğrenmesi Onayı:** Üretilen sinyallerin geçmişteki başarı oranını test eden Random Forest Classifier destekli yapay zeka vetosu.
+* **Haber Duyarlılığı (NLP Sentiment):** RSS beslemelerinden VADER ile hesaplanan haber duyarlılığı ve teknik sinyallerle uyuşmazlık (divergence) filtresi.
+* **Dinamik Risk ve Kasa Yönetimi:** Kelly Kriteri (Fractional Kelly) ile pozisyon boyutlandırma, ATR tabanlı Dinamik İzleyen Stop (Trailing Stop) ve Başa Baş (Breakeven) mantığı.
+* **Broker Soyutlama Katmanı (BAL):** Gerçek broker API'lerine kolayca geçiş yapmayı sağlayan SPL Düzey 3 standartlarında emir iletim mimarisi.
+* **Kurumsal Raporlama:** Matplotlib ve Seaborn ile oluşturulmuş, "ED Capital Kurumsal Şablonu"na uygun PDF/HTML Tear Sheet üretim modülü.
+* **Telegram Entegrasyonu:** Botu durdurma, başlatma, açık pozisyonları anında kapama (/kapat_hepsi) ve rapor alma gibi çift yönlü kontrol komutları.
 
-## Gelişmiş Raporlama & Test
-Bot; Tear sheet (HTML), Monte Carlo Simülasyonu ve Walk-Forward Optimization süreçlerini destekler. Yerel ortamda `python backtester.py` ve `python walk_forward.py` ile stratejileri test edebilirsiniz.
+## Kurulum ve Çalıştırma
+
+1. **Gereksinimler:** Docker ve Docker Compose kurulu olmalıdır.
+2. **Ortam Değişkenleri:** `.env.example` dosyasını kopyalayarak `.env` dosyası oluşturun ve `TELEGRAM_BOT_TOKEN`, `ADMIN_CHAT_ID` bilgilerinizi girin.
+3. **Başlatma:** Botu arka planda başlatmak için `./manage_bot.sh start` komutunu çalıştırın.
+4. **Loglar:** Logları anlık izlemek için `./manage_bot.sh logs` komutunu kullanabilirsiniz.
+
+## Güvenlik ve Uyarılar
+Bu bot şu anda **SADECE PAPER TRADING** (sanal para) ile çalışmaktadır. `data/paper_db.sqlite3` dosyası otomatik olarak oluşturulacak ve tüm işlem geçmişiniz burada tutulacaktır (Docker volumeleri ile kalıcı hale getirilmiştir). Herhangi bir gerçek para işlemi yapmak için `src/broker.py` içerisindeki `BaseBroker` sınıfını miras alan yeni bir sınıf yazmanız gerekmektedir.
