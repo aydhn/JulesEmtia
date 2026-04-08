@@ -86,20 +86,32 @@ class TelegramNotifier:
             return
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         payload = {"chat_id": self.admin_id, "text": text, "parse_mode": "Markdown"}
-        try:
-            await asyncio.to_thread(requests.post, url, json=payload, timeout=5)
-        except Exception as e:
-            logger.error(f"Telegram send failed: {e}")
+        for attempt in range(3):
+            try:
+                await asyncio.to_thread(requests.post, url, json=payload, timeout=5)
+                break
+            except Exception as e:
+                sleep_time = 1 * (2 ** attempt)
+                logger.error(f"Telegram send failed (Attempt {attempt+1}): {e}. Retrying in {sleep_time}s...")
+                await asyncio.sleep(sleep_time)
+        else:
+             logger.error("Failed to send Telegram message after 3 attempts.")
 
     async def send_document(self, doc_path: str, caption: str = ""):
         if not self.token or self.token == "DUMMY_TOKEN" or not self.admin_id: return
         url = f"https://api.telegram.org/bot{self.token}/sendDocument"
-        try:
-            with open(doc_path, 'rb') as doc:
-                payload = {"chat_id": self.admin_id, "caption": caption}
-                files = {"document": doc}
-                await asyncio.to_thread(requests.post, url, data=payload, files=files, timeout=10)
-        except Exception as e:
-            logger.error(f"Telegram doc send failed: {e}")
+        for attempt in range(3):
+            try:
+                with open(doc_path, 'rb') as doc:
+                    payload = {"chat_id": self.admin_id, "caption": caption}
+                    files = {"document": doc}
+                    await asyncio.to_thread(requests.post, url, data=payload, files=files, timeout=10)
+                break
+            except Exception as e:
+                sleep_time = 1 * (2 ** attempt)
+                logger.error(f"Telegram doc send failed (Attempt {attempt+1}): {e}. Retrying in {sleep_time}s...")
+                await asyncio.sleep(sleep_time)
+        else:
+            logger.error("Failed to send Telegram document after 3 attempts.")
 
 tg_bot = TelegramNotifier()

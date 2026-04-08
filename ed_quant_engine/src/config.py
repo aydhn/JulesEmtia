@@ -10,9 +10,9 @@ MODEL_PATH = "models/rf_model.pkl"
 
 TICKERS = {
     "Metals": ["GC=F", "SI=F", "HG=F", "PA=F", "PL=F"],
-    "Energy": ["CL=F", "BZ=F", "NG=F"],
-    "Agri": ["ZW=F", "ZC=F", "ZS=F", "KC=F", "CC=F", "SB=F", "CT=F"],
-    "Forex": ["USDTRY=X", "EURTRY=X", "GBPTRY=X", "JPYTRY=X"]
+    "Energy": ["CL=F", "BZ=F", "NG=F", "HO=F", "RB=F"],
+    "Agri": ["ZW=F", "ZC=F", "ZS=F", "KC=F", "CC=F", "SB=F", "CT=F", "LE=F"],
+    "Forex": ["USDTRY=X", "EURTRY=X", "GBPTRY=X", "JPYTRY=X", "CHFTRY=X", "AUDTRY=X", "CNHTRY=X"]
 }
 
 # Combine all into a single list
