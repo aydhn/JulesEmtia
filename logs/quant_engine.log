@@ -3,3 +3,18 @@
 2026-03-28 15:42:05,921 - ED_Capital - INFO - SQLite Paper Trade veritabanı başarıyla başlatıldı.
 2026-03-28 15:42:58,284 - ED_Capital - INFO - SQLite Paper Trade veritabanı başarıyla başlatıldı.
 2026-03-28 15:43:36,086 - ED_Capital - INFO - SQLite Paper Trade veritabanı başarıyla başlatıldı.
+2026-04-08 21:25:55,812 - ED_Quant_Engine - INFO - Database initialized.
+2026-04-08 21:25:55,815 - ED_Quant_Engine - INFO - Opened Trade #1 Long GC=F @ 2000.6000000000001
+2026-04-08 21:25:55,815 - ED_Quant_Engine - INFO - [EXECUTION RECEIPT] {'trade_id': 1, 'ticker': 'GC=F', 'direction': 'Long', 'requested_price': 2000.0, 'execution_price': 2000.6000000000001, 'slippage_applied': 0.4, 'spread_applied': 0.4, 'position_size': 1.0, 'status': 'FILLED'}
+2026-04-08 21:28:40,145 - ED_Quant_Engine - INFO - No closed trades to report.
+2026-04-08 21:29:01,601 - ED_Quant_Engine - INFO - Database initialized.
+2026-04-08 21:29:01,604 - ED_Quant_Engine - INFO - Opened Trade #2 Long GC=F @ 2000
+2026-04-08 21:29:22,161 - ED_Quant_Engine - INFO - Database initialized.
+2026-04-08 21:29:22,164 - ED_Quant_Engine - INFO - Opened Trade #3 Long GC=F @ 2000
+2026-04-08 21:30:04,877 - ED_Quant_Engine - INFO - Database initialized.
+2026-04-08 21:30:04,880 - ED_Quant_Engine - INFO - Opened Trade #1 Long GC=F @ 2000
+2026-04-08 21:30:04,885 - ED_Quant_Engine - INFO - Closed Trade #1 GC=F @ 2050 | PnL: 50.00
+2026-04-08 21:30:04,888 - ED_Quant_Engine - INFO - Opened Trade #2 Short GC=F @ 2050
+2026-04-08 21:30:04,893 - ED_Quant_Engine - INFO - Closed Trade #2 GC=F @ 2000 | PnL: 50.00
+2026-04-08 21:30:05,241 - ED_Quant_Engine - WARNING - Not enough trades for Monte Carlo simulation.
+2026-04-08 21:30:05,241 - ED_Quant_Engine - INFO - Tear sheet generated at reports/tear_sheet.html
