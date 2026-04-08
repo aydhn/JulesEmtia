@@ -4,13 +4,13 @@ import asyncio
 import sqlite3
 import pandas as pd
 from core.config import TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID
-from system.logger import log
+from .logger import log
 
 class TelegramManager:
     def __init__(self):
-        if not TELEGRAM_BOT_TOKEN:
+        if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN":
             log.warning("TELEGRAM_BOT_TOKEN not found in env.")
-        self.app = Application.builder().token(TELEGRAM_BOT_TOKEN).build() if TELEGRAM_BOT_TOKEN else None
+        self.app = Application.builder().token(TELEGRAM_BOT_TOKEN).build() if TELEGRAM_BOT_TOKEN and TELEGRAM_BOT_TOKEN != "YOUR_BOT_TOKEN" else None
         self.is_paused = False
 
         # Will hold a reference to main.py's run_live_cycle for forced scans
