@@ -17,6 +17,7 @@ class NLPSentimentFilter:
             "Oil": ["oil", "wti", "brent", "crude", "opec"],
             "Forex": ["fed", "inflation", "rates", "dollar", "powell", "cpi"],
         }
+        self.sentiment_cache = {}
 
     async def _fetch_feed(self, url: str) -> list:
         try:
@@ -52,5 +53,25 @@ class NLPSentimentFilter:
             if counts[category] > 0:
                 sentiment_scores[category] /= counts[category]
 
+        self.sentiment_cache = sentiment_scores
         quant_logger.info(f"NLP Sentiment Updated: {sentiment_scores}")
         return sentiment_scores
+
+    def veto_signal(self, ticker: str, direction: str) -> bool:
+        """
+        Phase 20: Vetos a signal if the sentiment is heavily against it.
+        """
+        category = "Forex"
+        if "GC=F" in ticker or "SI=F" in ticker: category = "Gold"
+        if "CL=F" in ticker or "BZ=F" in ticker: category = "Oil"
+
+        score = self.sentiment_cache.get(category, 0.0)
+
+        if direction == "Long" and score <= -0.5:
+            quant_logger.warning(f"Sentiment Veto: Rejected Long on {ticker} due to extremely negative news ({score}).")
+            return True
+        if direction == "Short" and score >= 0.5:
+            quant_logger.warning(f"Sentiment Veto: Rejected Short on {ticker} due to extremely positive news ({score}).")
+            return True
+
+        return False
