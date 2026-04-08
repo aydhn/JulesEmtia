@@ -10,14 +10,22 @@ class ExecutionModel:
     def __init__(self):
         # Base spread percentages for categories
         self.base_spreads = {
-            "METALS": 0.0002,  # 0.02%
-            "ENERGY": 0.0003,  # 0.03%
-            "AGRI":   0.0005,  # 0.05%
-            "FOREX":  0.0010   # 0.10% (TRY pairs are wide)
+            "Metals": 0.0002,  # 0.02%
+            "Energy": 0.0003,  # 0.03%
+            "Agri":   0.0005,  # 0.05%
+            "Forex":  0.0010   # 0.10% (TRY pairs are wide)
         }
 
-    def calculate_costs(self, ticker: str, category: str, current_price: float, atr: float) -> Tuple[float, float]:
+    def get_category(self, ticker: str) -> str:
+        from src.config import TICKERS
+        for cat, tickers in TICKERS.items():
+            if ticker in tickers:
+                return cat
+        return "Metals"
+
+    def calculate_costs(self, ticker: str, current_price: float, atr: float) -> Tuple[float, float]:
         """Calculates dynamic spread and ATR-adjusted slippage."""
+        category = self.get_category(ticker)
         base_spread = self.base_spreads.get(category, 0.0002) * current_price
 
         # Volatility factor based on ATR relative to price (normalized approx 0.5%)

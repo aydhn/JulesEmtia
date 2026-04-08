@@ -1,6 +1,7 @@
 import yfinance as yf
 import logging
 import pandas as pd
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +34,9 @@ class MacroFilter:
 
         try:
             closes = ltf_df['Close']
-            mean = closes.rolling(window=50).mean().iloc[-1]
-            std = closes.rolling(window=50).std().iloc[-1]
-            current = closes.iloc[-1]
+            mean = float(closes.rolling(window=50).mean().iloc[-1])
+            std = float(closes.rolling(window=50).std().iloc[-1])
+            current = float(closes.iloc[-1])
 
             if std == 0: return False
 
@@ -51,15 +52,15 @@ class MacroFilter:
     async def fetch_macro_data(self):
         """Fetches DXY and 10Y Yields for regime filter."""
         try:
-            dxy = yf.download("DX-Y.NYB", period="100d", progress=False)
-            tnx = yf.download("^TNX", period="100d", progress=False)
+            dxy = await asyncio.to_thread(yf.download, "DX-Y.NYB", period="100d", progress=False)
+            tnx = await asyncio.to_thread(yf.download, "^TNX", period="100d", progress=False)
             self.macro_data = {"DXY": dxy, "TNX": tnx}
         except Exception as e:
             logger.warning(f"Failed to fetch macro data: {e}")
 
     def get_regime_veto(self, direction: str, category: str) -> bool:
         """Vetos LONGs in Metals/EM if DXY and Yields are strongly rising."""
-        if category not in ["METALS", "FOREX", "AGRI"]:
+        if category.upper() not in ["METALS", "FOREX", "AGRI"]:
             return False
 
         dxy = self.macro_data.get("DXY")

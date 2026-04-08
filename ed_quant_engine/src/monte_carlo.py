@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import sqlite3
 import logging
+from src.config import DB_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -9,7 +10,7 @@ class MonteCarloSimulator:
     """
     Phase 22: Monte Carlo Simulation and Risk of Ruin
     """
-    def __init__(self, db_path: str = "paper_db.sqlite3", simulations: int = 10000):
+    def __init__(self, db_path: str = DB_PATH, simulations: int = 10000):
         self.db_path = db_path
         self.simulations = simulations
 

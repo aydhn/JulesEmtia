@@ -4,7 +4,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-class WalkForwardOptimizer:
+class Backtester:
     """
     Phase 7: Historical Backtesting
     Phase 14: Walk-Forward Optimization (WFO)

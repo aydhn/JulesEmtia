@@ -19,10 +19,10 @@ class SentimentEngine:
         self.cache = {}
         # Simple RSS feeds mappings based on category (using free feeds)
         self.feeds = {
-            "METALS": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
-            "ENERGY": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
-            "AGRI": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
-            "FOREX": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"
+            "Metals": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
+            "Energy": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
+            "Agri": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
+            "Forex": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"
         }
 
     async def fetch_sentiment(self, category: str):
