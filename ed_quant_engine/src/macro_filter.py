@@ -1,6 +1,6 @@
 import yfinance as yf
 import pandas as pd
-from src.logger import logger
+from src.logger import quant_logger as logger
 import asyncio
 
 class MacroFilter:

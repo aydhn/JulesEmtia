@@ -1,6 +1,6 @@
 import pandas as pd
 from typing import Dict
-from src.logger import logger
+from src.logger import quant_logger as logger
 
 class ExecutionModel:
     def __init__(self):

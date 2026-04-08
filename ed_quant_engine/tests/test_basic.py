@@ -5,8 +5,8 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 def test_imports():
-    from src.config import ALL_TICKERS
-    assert len(ALL_TICKERS) > 0
+    from src.config import TICKERS
+    assert len(TICKERS) > 0
 
     from src.execution_model import ExecutionModel
     em = ExecutionModel()
