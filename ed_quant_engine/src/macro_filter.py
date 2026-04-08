@@ -32,3 +32,19 @@ def check_flash_crash(df, z_threshold=Z_SCORE_THRESHOLD) -> bool:
             logger.warning(f"🚨 FLASH CRASH DETECTED! Z-Score: {z_score:.2f}")
             return True
     return False
+
+def check_macro_regime_veto(ticker: str, direction: str, macro_data: dict) -> bool:
+    """
+    Rejects Long positions on Metals and TRY Forex if the regime is Risk-Off (strong DXY/US10Y).
+    Returns False if vetoed (do not trade), True if approved.
+    """
+    from src.config import UNIVERSE
+
+    regime = macro_data.get("Regime", "Risk-On")
+
+    if regime == "Risk-Off" and direction == "Long":
+        if ticker in UNIVERSE.get("Metals", []) or ticker in UNIVERSE.get("Forex_TRY", []):
+            logger.info(f"Macro Regime Veto: Rejected Long on {ticker} due to Risk-Off regime.")
+            return False
+
+    return True

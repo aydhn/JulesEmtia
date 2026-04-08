@@ -4,23 +4,51 @@ import time
 from datetime import datetime
 import gc
 import pandas as pd
+import yfinance as yf
 
 from src.logger import get_logger
 from src.config import ALL_TICKERS, get_spread
 from src.data_loader import get_mtf_data, fetch_macro_data
 from src.features import merge_mtf_data
-from src.macro_filter import check_circuit_breaker, check_flash_crash
+from src.macro_filter import check_circuit_breaker, check_flash_crash, check_macro_regime_veto
 from src.sentiment_filter import fetch_rss_sentiment
 from src.portfolio import check_global_limits, calculate_correlation_matrix, check_correlation_veto
 from src.strategy import generate_signals, manage_open_positions
 from src.broker import PaperBroker
-from src.notifier import get_telegram_application, send_telegram_message, send_telegram_document, engine_paused
+from src.notifier import get_telegram_application, send_telegram_message, send_telegram_document
 from src.ml_validator import validate_signal, train_model
 from src.reporter import create_tear_sheet
 import src.paper_db as db
 
 logger = get_logger()
 broker = PaperBroker()
+
+async def panic_close_all():
+    """Immediately closes all open positions."""
+    logger.warning("Panic Close All Triggered.")
+    open_trades = broker.get_open_positions()
+
+    if not open_trades:
+        await send_telegram_message("Açık pozisyon bulunamadı.")
+        return
+
+    for trade in open_trades:
+        ticker = trade['ticker']
+        try:
+            current_data = await asyncio.to_thread(yf.download, tickers=ticker, period="1d", interval="1m", progress=False)
+            if current_data.empty:
+                continue
+
+            if isinstance(current_data.columns, pd.MultiIndex):
+                current_price = current_data['Close'][ticker].iloc[-1]
+            else:
+                current_price = current_data['Close'].iloc[-1]
+
+            broker.close_position(trade['trade_id'], current_price)
+        except Exception as e:
+            logger.error(f"Error panic closing {ticker}: {e}")
+
+    await send_telegram_message("✅ Panik kapatması tamamlandı.")
 
 async def run_live_cycle():
     from src.notifier import engine_paused
@@ -56,7 +84,7 @@ async def run_live_cycle():
             logger.error(f"Error processing {ticker}: {e}")
 
     # 3. Manage Open Positions (Always runs, even in Black Swan or Paused)
-    manage_open_positions(broker, df_dict)
+    manage_open_positions(broker, df_dict, black_swan)
 
     # Check if we should search for new signals
     if black_swan or engine_paused:
@@ -74,8 +102,12 @@ async def run_live_cycle():
 
     # 5. Signal Generation & Validation
     for ticker, df in df_dict.items():
-        signal = generate_signals(df, ticker, current_balance)
+        signal = generate_signals(df, ticker, current_balance, macro_data.get("Regime", "Risk-On"))
         if signal:
+            # Macro Regime Veto
+            if not check_macro_regime_veto(ticker, signal['direction'], macro_data):
+                continue
+
             # ML Validation
             if not validate_signal(signal['features']):
                 continue
@@ -100,8 +132,7 @@ async def run_live_cycle():
                 sl_price=signal['sl_price'],
                 tp_price=signal['tp_price'],
                 position_size=signal['position_size'],
-                slippage=0.0005,
-                spread=get_spread(ticker)
+                atr=signal['features'].get('ATR_14', 0.0)
             )
 
             msg = f"🟢 <b>YENİ İŞLEM AÇILDI</b>\n" \
@@ -143,6 +174,30 @@ async def weekly_report():
 def report_job():
     asyncio.create_task(weekly_report())
 
+async def retrain_model_async():
+    logger.info("Starting weekend ML model retraining...")
+    # Gather historical data for a few diverse tickers
+    df_list = []
+    for ticker in ["GC=F", "CL=F", "EURTRY=X"]:
+        try:
+            df = await asyncio.to_thread(yf.download, tickers=ticker, period="5y", interval="1d", progress=False)
+            if not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                from src.features import add_features
+                df = add_features(df, "1d")
+                df_list.append(df)
+        except Exception as e:
+            logger.error(f"Error fetching training data for {ticker}: {e}")
+
+    if df_list:
+        combined_df = pd.concat(df_list, ignore_index=True)
+        train_model(combined_df)
+    logger.info("Weekend ML model retraining complete.")
+
+def retrain_job():
+    asyncio.create_task(retrain_model_async())
+
 async def main():
     logger.info("Initializing ED Capital Quant Engine...")
     db.init_db()
@@ -161,6 +216,7 @@ async def main():
     schedule.every().hour.at(":01").do(scheduled_job)
     schedule.every().day.at("08:00").do(heartbeat_job)
     schedule.every().friday.at("23:00").do(report_job)
+    schedule.every().saturday.at("10:00").do(retrain_job)
 
     logger.info("Scheduler running. Entering main loop.")
 

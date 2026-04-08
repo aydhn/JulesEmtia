@@ -18,8 +18,19 @@ def add_features(df: pd.DataFrame, timeframe="1h") -> pd.DataFrame:
     df['EMA_50'] = ta.ema(df['Close'], length=50)
     df['EMA_200'] = ta.ema(df['Close'], length=200)
 
+    # ADX (Trend Strength)
+    adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+    if adx is not None:
+        df = pd.concat([df, adx], axis=1)
+
     # Momentum
     df['RSI_14'] = ta.rsi(df['Close'], length=14)
+
+    # Stochastic RSI
+    stochrsi = ta.stochrsi(df['Close'], length=14, rsi_length=14, k=3, d=3)
+    if stochrsi is not None:
+        df = pd.concat([df, stochrsi], axis=1)
+
     macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
     if macd is not None:
         df = pd.concat([df, macd], axis=1)
@@ -43,6 +54,15 @@ def add_features(df: pd.DataFrame, timeframe="1h") -> pd.DataFrame:
     high_max = df['High'].rolling(window=5).max()
     rsi_max = df['RSI_14'].rolling(window=5).max()
     df['Bear_Div'] = np.where((df['High'] > high_max.shift(1)) & (df['RSI_14'] < rsi_max.shift(1)), 1, 0)
+
+    # MACD Divergences
+    macd_h = [c for c in df.columns if c.startswith('MACDh')]
+    if macd_h:
+        macd_hist = df[macd_h[0]]
+        macd_hist_min = macd_hist.rolling(window=5).min()
+        macd_hist_max = macd_hist.rolling(window=5).max()
+        df['MACD_Bull_Div'] = np.where((df['Low'] < low_min.shift(1)) & (macd_hist > macd_hist_min.shift(1)), 1, 0)
+        df['MACD_Bear_Div'] = np.where((df['High'] > high_max.shift(1)) & (macd_hist < macd_hist_max.shift(1)), 1, 0)
 
     df.dropna(inplace=True)
     return df

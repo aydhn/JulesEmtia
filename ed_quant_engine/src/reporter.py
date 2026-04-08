@@ -5,6 +5,7 @@ import base64
 from io import BytesIO
 import src.paper_db as db
 from src.logger import get_logger
+from src.monte_carlo import run_monte_carlo
 import os
 
 logger = get_logger()
@@ -47,6 +48,32 @@ def create_tear_sheet(output_format="html"):
     equity_img_base64 = base64.b64encode(buf.read()).decode('utf-8')
     plt.close()
 
+    # Monthly Returns Heatmap
+    heatmap_img_base64 = ""
+    try:
+        df['exit_time'] = pd.to_datetime(df['exit_time'])
+        df['Year'] = df['exit_time'].dt.year
+        df['Month'] = df['exit_time'].dt.month
+        monthly_pnl = df.groupby(['Year', 'Month'])['pnl_pct'].sum().unstack().fillna(0) * 100
+
+        plt.figure(figsize=(10, 5))
+        sns.heatmap(monthly_pnl, annot=True, fmt=".2f", cmap="RdYlGn", center=0)
+        plt.title('Aylık Getiri Isı Haritası (%)')
+        plt.tight_layout()
+
+        buf_hm = BytesIO()
+        plt.savefig(buf_hm, format='png')
+        buf_hm.seek(0)
+        heatmap_img_base64 = base64.b64encode(buf_hm.read()).decode('utf-8')
+        plt.close()
+    except Exception as e:
+        logger.error(f"Error generating heatmap: {e}")
+
+    # Monte Carlo Risk Validation
+    mc_results = run_monte_carlo()
+    mc_md_99 = mc_results.get("expected_max_drawdown_99", 0.0)
+    mc_ruin = mc_results.get("risk_of_ruin_pct", 0.0)
+
     # HTML Template
     html_content = f"""
     <html>
@@ -58,6 +85,7 @@ def create_tear_sheet(output_format="html"):
             .metric-box {{ background: #f7fafc; border: 1px solid #e2e8f0; padding: 15px; margin: 10px 0; border-radius: 5px; }}
             .metric-row {{ display: flex; justify-content: space-between; margin-bottom: 10px; }}
             .metric-label {{ font-weight: bold; }}
+            .risk-critical {{ color: #e53e3e; font-weight: bold; }}
             img {{ max-width: 100%; height: auto; border: 1px solid #e2e8f0; margin-top: 20px; }}
         </style>
     </head>
@@ -66,13 +94,27 @@ def create_tear_sheet(output_format="html"):
         <div class="metric-box">
             <div class="metric-row"><span class="metric-label">Başlangıç Bakiyesi:</span> <span>${initial_balance:.2f}</span></div>
             <div class="metric-row"><span class="metric-label">Güncel Bakiye:</span> <span>${current_balance:.2f}</span></div>
-            <div class="metric-row"><span class="metric-label">Net PnL:</span> <span>${total_pnl:.2f}</span></div>
+            <div class="metric-row"><span class="metric-label">Net PnL (Ücretler Sonrası):</span> <span>${total_pnl:.2f}</span></div>
             <div class="metric-row"><span class="metric-label">İsabet Oranı (Win Rate):</span> <span>{win_rate:.2f}%</span></div>
             <div class="metric-row"><span class="metric-label">Kâr Faktörü (Profit Factor):</span> <span>{profit_factor:.2f}</span></div>
-            <div class="metric-row"><span class="metric-label">Ortalama Kâr / Zarar:</span> <span>${avg_win:.2f} / ${avg_loss:.2f}</span></div>
+            <div class="metric-row"><span class="metric-label">Ortalama Kâr / Zarar:</span> <span>${avg_win:.2f} / ${abs(avg_loss):.2f}</span></div>
         </div>
+
+        <h2>Risk Validasyonu (Monte Carlo)</h2>
+        <div class="metric-box">
+            <div class="metric-row"><span class="metric-label">%99 Güven Aralığında Max Drawdown:</span> <span class="risk-critical">{mc_md_99:.2f}%</span></div>
+            <div class="metric-row"><span class="metric-label">İflas Riski (Risk of Ruin):</span> <span class="risk-critical">{mc_ruin:.2f}%</span></div>
+        </div>
+
         <h2>Kasa Büyüme Eğrisi</h2>
         <img src="data:image/png;base64,{equity_img_base64}" alt="Equity Curve">
+
+        <h2>Aylık Getiri Analizi</h2>
+        """
+    if heatmap_img_base64:
+        html_content += f'<img src="data:image/png;base64,{heatmap_img_base64}" alt="Monthly Heatmap">'
+
+    html_content += """
     </body>
     </html>
     """

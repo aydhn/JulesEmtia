@@ -5,6 +5,7 @@ from src.logger import get_logger
 import src.paper_db as db
 import os
 import asyncio
+from src.broker import PaperBroker
 
 logger = get_logger()
 
@@ -62,10 +63,18 @@ async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def panic_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
-    # This just sets a flag or communicates to main loop to close all.
-    # For now, acknowledge.
-    await update.message.reply_text("🚨 PANİK BUTONU TETİKLENDİ. Tüm açık pozisyonlar kapatılıyor...")
-    # Signal main loop to close all... (handled in main.py)
+    await update.message.reply_text("🚨 PANİK BUTONU TETİKLENDİ. Tüm açık pozisyonlar piyasa fiyatından kapatılıyor...")
+
+    # Needs fetching current prices for open positions
+    # Will be handled gracefully. We invoke it via a background task
+    import main
+    asyncio.create_task(main.panic_close_all())
+
+async def force_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update): return
+    await update.message.reply_text("🔍 Taramaya Başlanıyor...")
+    import main
+    asyncio.create_task(main.run_live_cycle())
 
 def get_telegram_application():
     if not TELEGRAM_BOT_TOKEN:
@@ -76,4 +85,5 @@ def get_telegram_application():
     app.add_handler(CommandHandler("durdur", pause))
     app.add_handler(CommandHandler("devam", resume))
     app.add_handler(CommandHandler("kapat_hepsi", panic_close))
+    app.add_handler(CommandHandler("tara", force_scan))
     return app

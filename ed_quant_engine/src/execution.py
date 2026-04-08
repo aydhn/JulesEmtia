@@ -12,13 +12,13 @@ class ExecutionModel:
         self.base_spreads = {
             "Metals": 0.0002,  # 0.02%
             "Energy": 0.0003,  # 0.03%
-            "Agri":   0.0005,  # 0.05%
-            "Forex":  0.0010   # 0.10% (TRY pairs are wide)
+            "Agriculture":   0.0005,  # 0.05%
+            "Forex_TRY":  0.0010   # 0.10% (TRY pairs are wide)
         }
 
     def get_category(self, ticker: str) -> str:
-        from src.config import TICKERS
-        for cat, tickers in TICKERS.items():
+        from src.config import UNIVERSE
+        for cat, tickers in UNIVERSE.items():
             if ticker in tickers:
                 return cat
         return "Metals"
@@ -29,6 +29,10 @@ class ExecutionModel:
         base_spread = self.base_spreads.get(category, 0.0002) * current_price
 
         # Volatility factor based on ATR relative to price (normalized approx 0.5%)
+        # Guard against zero division
+        if current_price == 0:
+            return 0.0, 0.0
+
         volatility_factor = (atr / current_price) / 0.005
         volatility_factor = max(1.0, min(volatility_factor, 3.0)) # Cap multiplier
 
