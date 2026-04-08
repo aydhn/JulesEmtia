@@ -1,19 +1,21 @@
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-print("Testing imports again...")
+print("Testing core engine imports...")
 try:
     import main
-    import strategy
-    import ml_validator
-    import features
-    import portfolio_manager
-    import execution_model
-    import paper_db
-    import paper_broker
-    import walk_forward
-    import monte_carlo
-    print("SUCCESS: All modules including new ones imported without errors.")
+    from src import strategy
+    from src import ml_validator
+    from src import features
+    from src import portfolio_manager
+    from src import broker
+    from src import monte_carlo
+    from src import reporter
+    from src import sentiment_filter
+    from src import data_engine
+    print("SUCCESS: All modules imported without errors.")
 except Exception as e:
+    import traceback
     print(f"FAILED: Import error detected -> {e}")
+    traceback.print_exc()
