@@ -3,6 +3,11 @@ from typing import Dict, Optional
 from .logger import quant_logger
 
 class StrategyEngine:
+
+
+
+
+
     @staticmethod
     def check_signals(df: pd.DataFrame) -> Optional[str]:
         """
@@ -31,17 +36,35 @@ class StrategyEngine:
         bb_lower = last_closed.get('BBL_20_2.0', 0)
         bb_upper = last_closed.get('BBU_20_2.0', 999999)
 
+        # New LTF Indicators
+        adx = last_closed.get('ADX_14', 0)
+        stoch_k = last_closed.get('STOCHRSIk_14_14_3_3', 50)
+        stoch_d = last_closed.get('STOCHRSId_14_14_3_3', 50)
+        bullish_div = last_closed.get('Bullish_Div', False)
+        bearish_div = last_closed.get('Bearish_Div', False)
+
+        # We require a trend if ADX is available, e.g. ADX > 20 means there is a trend
+        has_trend = adx > 20 if 'ADX_14' in last_closed else True
+
         # LONG Confluence
-        if htf_trend_up and close > ema_50:
-            if (rsi < 35 or close <= bb_lower) and macd > 0:
+        if htf_trend_up and close > ema_50 and has_trend:
+            oscillator_long = (rsi < 35 or close <= bb_lower) and macd > 0
+            stoch_long = (stoch_k > stoch_d) and (stoch_k < 20)
+
+            if oscillator_long or stoch_long or bullish_div:
                 return 'Long'
 
         # SHORT Confluence
-        if htf_trend_down and close < ema_50:
-            if (rsi > 65 or close >= bb_upper) and macd < 0:
+        if htf_trend_down and close < ema_50 and has_trend:
+            oscillator_short = (rsi > 65 or close >= bb_upper) and macd < 0
+            stoch_short = (stoch_k < stoch_d) and (stoch_k > 80)
+
+            if oscillator_short or stoch_short or bearish_div:
                 return 'Short'
 
         return None
+
+
 
     @staticmethod
     def calculate_dynamic_risk(entry_price: float, atr: float, direction: str) -> tuple[float, float]:
