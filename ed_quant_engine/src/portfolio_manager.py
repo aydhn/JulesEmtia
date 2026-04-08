@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import logging
 from typing import Dict, List
-from .broker import BaseBroker
+from src.broker import BaseBroker
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +19,6 @@ class PortfolioManager:
 
     def calculate_kelly_fraction(self) -> float:
         """Calculates Half-Kelly based on closed trades."""
-        # We need a way to access DB directly for closed trades stats, assuming we can use PaperBroker's DB for now
-        # Ideally, we inject a repository, but for simplicity we'll write the raw SQL query here if it's PaperBroker
         if hasattr(self.broker, "db_path"):
             import sqlite3
             conn = sqlite3.connect(self.broker.db_path)
@@ -52,6 +50,19 @@ class PortfolioManager:
 
         # Hard Cap at 4%
         return max(0.005, min(half_kelly, 0.04))
+
+    def calculate_correlation_matrix(self, price_data_dict: Dict[str, pd.DataFrame], window: int = 60) -> pd.DataFrame:
+        """Calculate rolling Pearson correlation matrix for the universe."""
+        prices = {}
+        for ticker, df in price_data_dict.items():
+            if not df.empty and 'Close' in df.columns:
+                prices[ticker] = df['Close'].tail(window)
+
+        if not prices:
+            return pd.DataFrame()
+
+        prices_df = pd.DataFrame(prices)
+        return prices_df.corr(method='pearson')
 
     def check_correlation_veto(self, new_ticker: str, new_dir: str, corr_matrix: pd.DataFrame) -> bool:
         """Prevents doubling risk on highly correlated assets."""

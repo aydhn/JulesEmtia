@@ -26,6 +26,11 @@ def calculate_mtf_features(htf_df: pd.DataFrame, ltf_df: pd.DataFrame) -> pd.Dat
         if macd_htf is not None and not macd_htf.empty:
             htf_df = pd.concat([htf_df, macd_htf], axis=1)
 
+        # ADX
+        adx_htf = ta.adx(htf_df['High'], htf_df['Low'], htf_df['Close'])
+        if adx_htf is not None and not adx_htf.empty:
+            htf_df = pd.concat([htf_df, adx_htf], axis=1)
+
         # Shift HTF by 1 to prevent lookahead bias!
         # The closing data of day T is only available on day T+1
         htf_shifted = htf_df.shift(1).reset_index()

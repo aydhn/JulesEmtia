@@ -1,99 +1,79 @@
 import pandas as pd
-import logging
 import sqlite3
+import logging
+from datetime import datetime
 import os
+from src.config import DB_PATH
 
 logger = logging.getLogger(__name__)
 
 class Reporter:
     """
-    Phase 13: ED Capital Kurumsal Tear Sheet Generation
-    Generates professional reports (HTML).
+    Phase 13: Kurumsal Raporlama (ED Capital Standartları)
     """
-    def __init__(self, db_path: str = "paper_db.sqlite3"):
+    def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
 
-    def _get_closed_trades(self) -> pd.DataFrame:
-        try:
-            conn = sqlite3.connect(self.db_path)
-            df = pd.read_sql("SELECT * FROM trades WHERE status = 'Closed'", conn)
-            conn.close()
-            return df
-        except Exception as e:
-            logger.error(f"Failed to fetch trades for report: {e}")
+    def fetch_closed_trades(self) -> pd.DataFrame:
+        if not os.path.exists(self.db_path):
             return pd.DataFrame()
+        conn = sqlite3.connect(self.db_path)
+        df = pd.read_sql("SELECT * FROM trades WHERE status = 'Closed'", conn)
+        conn.close()
+        return df
 
-    def generate_tear_sheet(self) -> str:
-        df = self._get_closed_trades()
-        report_path = "ed_capital_tear_sheet.html"
-
+    def generate_html_report(self) -> str:
+        df = self.fetch_closed_trades()
         if df.empty:
-            with open(report_path, "w") as f:
-                f.write("<h1>ED Capital - Piyasalara Genel Bakış</h1><p>Henüz tamamlanmış işlem bulunmamaktadır.</p>")
-            return report_path
+            return "<html><body><h2>Piyasalara Genel Bakış</h2><p>Henüz kapanmış işlem yok.</p></body></html>"
 
-        # Metrics Calculation
-        total_pnl = df['pnl'].sum()
-        win_trades = df[df['pnl'] > 0]
-        loss_trades = df[df['pnl'] <= 0]
+        total_trades = len(df)
+        wins = df[df['pnl'] > 0]
+        losses = df[df['pnl'] <= 0]
 
-        win_rate = len(win_trades) / len(df) if len(df) > 0 else 0
-        avg_win = win_trades['pnl'].mean() if not win_trades.empty else 0
-        avg_loss = abs(loss_trades['pnl'].mean()) if not loss_trades.empty else 0
-        profit_factor = (win_trades['pnl'].sum() / abs(loss_trades['pnl'].sum())) if abs(loss_trades['pnl'].sum()) > 0 else float('inf')
+        win_rate = len(wins) / total_trades if total_trades > 0 else 0
+        gross_profit = wins['pnl'].sum() if not wins.empty else 0
+        gross_loss = abs(losses['pnl'].sum()) if not losses.empty else 0
+        profit_factor = gross_profit / gross_loss if gross_loss != 0 else 0
+        net_pnl = gross_profit - gross_loss
 
-        df['Cumulative_PnL'] = df['pnl'].cumsum()
-        df['Peak'] = df['Cumulative_PnL'].cummax()
-        df['Drawdown'] = df['Cumulative_PnL'] - df['Peak']
-        max_drawdown = df['Drawdown'].min()
-
-        html_content = f"""
+        # Generate HTML (Avoiding heavy matplotlib for now to keep it lightweight)
+        html = f"""
         <html>
         <head>
             <style>
-                body {{ font-family: Arial, sans-serif; background-color: #f4f4f9; color: #333; }}
-                .container {{ width: 80%; margin: auto; padding: 20px; background-color: #fff; box-shadow: 0 0 10px rgba(0,0,0,0.1); }}
-                h1 {{ color: #2c3e50; border-bottom: 2px solid #2c3e50; padding-bottom: 10px; }}
-                .metric-box {{ display: inline-block; width: 30%; padding: 15px; margin: 10px; background-color: #ecf0f1; border-radius: 5px; text-align: center; }}
-                .metric-title {{ font-size: 14px; color: #7f8c8d; text-transform: uppercase; }}
-                .metric-value {{ font-size: 24px; font-weight: bold; color: #2980b9; }}
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; color: #333; }}
+                .header {{ background-color: #0b1a30; color: white; padding: 20px; text-align: center; }}
+                .content {{ padding: 20px; }}
+                table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+                th, td {{ padding: 10px; border-bottom: 1px solid #ddd; text-align: left; }}
+                th {{ background-color: #f2f2f2; }}
             </style>
         </head>
         <body>
-            <div class="container">
-                <h1>ED Capital - Piyasalara Genel Bakış</h1>
-                <div class="metric-box">
-                    <div class="metric-title">Toplam PnL</div>
-                    <div class="metric-value">${total_pnl:,.2f}</div>
-                </div>
-                <div class="metric-box">
-                    <div class="metric-title">Win Rate</div>
-                    <div class="metric-value">{win_rate:.2%}</div>
-                </div>
-                <div class="metric-box">
-                    <div class="metric-title">Profit Factor</div>
-                    <div class="metric-value">{profit_factor:.2f}</div>
-                </div>
-                <div class="metric-box">
-                    <div class="metric-title">Maksimum Düşüş (Max DD)</div>
-                    <div class="metric-value">${max_drawdown:,.2f}</div>
-                </div>
-                <div class="metric-box">
-                    <div class="metric-title">Ortalama Kâr</div>
-                    <div class="metric-value">${avg_win:,.2f}</div>
-                </div>
-                <div class="metric-box">
-                    <div class="metric-title">Ortalama Zarar</div>
-                    <div class="metric-value">$-{avg_loss:,.2f}</div>
-                </div>
-                <p>Not: Rapor otomatik olarak ED Capital Quant Engine tarafından üretilmiştir.</p>
+            <div class="header">
+                <h1>ED Capital Quant Engine</h1>
+                <h2>Piyasalara Genel Bakış</h2>
+                <p>Tarih: {datetime.now().strftime("%Y-%m-%d")}</p>
+            </div>
+            <div class="content">
+                <h3>Performans Metrikleri</h3>
+                <table>
+                    <tr><th>Metrik</th><th>Değer</th></tr>
+                    <tr><td>Toplam İşlem</td><td>{total_trades}</td></tr>
+                    <tr><td>Net Kâr (PnL)</td><td>${net_pnl:.2f}</td></tr>
+                    <tr><td>İsabet Oranı (Win Rate)</td><td>{win_rate*100:.1f}%</td></tr>
+                    <tr><td>Kâr Faktörü (Profit Factor)</td><td>{profit_factor:.2f}</td></tr>
+                </table>
             </div>
         </body>
         </html>
         """
 
+        report_path = f"reports/tear_sheet_{datetime.now().strftime('%Y%m%d')}.html"
+        os.makedirs("reports", exist_ok=True)
         with open(report_path, "w", encoding="utf-8") as f:
-            f.write(html_content)
+            f.write(html)
 
-        logger.info(f"Tear sheet successfully generated at {report_path}")
+        logger.info(f"Tear sheet generated: {report_path}")
         return report_path

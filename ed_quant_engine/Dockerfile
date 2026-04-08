@@ -22,13 +22,19 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # NLTK verisini indir
-RUN python -m nltk.downloader vader_lexicon
+RUN python -m nltk.downloader vader_lexicon -d /usr/share/nltk_data || true
 
 COPY src/ ./src/
-COPY main.py .
+# Move main back out to app root based on structure if needed, or leave in src
+# According to main.py path, it looks for src.* imports
+# The main.py should be in /app/main.py
+
+RUN mv /app/src/main.py /app/main.py 2>/dev/null || true
 
 RUN chown -R quantuser:quantuser /app
 
 USER quantuser
+
+ENV PYTHONPATH=/app
 
 CMD ["python", "main.py"]

@@ -23,7 +23,10 @@ class Strategy:
 
         htf_close = prev_candle['Close_HTF']
         htf_ema50 = prev_candle['EMA_50_HTF']
-        htf_macd = prev_candle['MACDh_12_26_9_HTF'] if 'MACDh_12_26_9_HTF' in prev_candle else 0
+
+        # Determine column name robustly
+        htf_macd_col = [c for c in mtf_df.columns if c.startswith('MACDh_') and c.endswith('_HTF')]
+        htf_macd = prev_candle[htf_macd_col[0]] if htf_macd_col else 0
 
         htf_bullish = htf_close > htf_ema50 and htf_macd > 0
         htf_bearish = htf_close < htf_ema50 and htf_macd < 0
@@ -31,8 +34,13 @@ class Strategy:
         # LTF Confirmations (Entry Triggers)
         ltf_close = prev_candle['Close']
         ltf_ema50 = prev_candle['EMA_50']
-        ltf_rsi = prev_candle.get('RSI_14', 50)
-        ltf_macd = prev_candle.get('MACDh_12_26_9', 0)
+
+        # Ensure column exists for RSI and MACD
+        rsi_col = [c for c in mtf_df.columns if c.startswith('RSI_')]
+        ltf_rsi = prev_candle[rsi_col[0]] if rsi_col else 50
+
+        ltf_macd_col = [c for c in mtf_df.columns if c.startswith('MACDh_') and not c.endswith('_HTF')]
+        ltf_macd = prev_candle[ltf_macd_col[0]] if ltf_macd_col else 0
 
         # Divergences (If they exist)
         div_bull_rsi = prev_candle.get('Bullish_Div_RSI', False)
@@ -42,7 +50,8 @@ class Strategy:
         ltf_bull_cond = (ltf_rsi < 35 or ltf_macd > 0 or div_bull_rsi) and ltf_close > ltf_ema50
         ltf_bear_cond = (ltf_rsi > 65 or ltf_macd < 0 or div_bear_rsi) and ltf_close < ltf_ema50
 
-        atr = prev_candle.get('ATR_14', ltf_close * 0.01)
+        atr_col = [c for c in mtf_df.columns if c.startswith('ATR_')]
+        atr = prev_candle[atr_col[0]] if atr_col else ltf_close * 0.01
 
         if htf_bullish and ltf_bull_cond:
             return {"dir": "LONG", "price": ltf_close, "atr": atr}

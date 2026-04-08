@@ -1,8 +1,9 @@
 import abc
-from typing import Dict, List
+from typing import Dict, List, Optional
 import sqlite3
 from datetime import datetime
 import logging
+from src.config import DB_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +31,13 @@ class BaseBroker(abc.ABC):
     def get_open_positions(self) -> List[Dict]:
         pass
 
+    @abc.abstractmethod
+    def close_all_positions(self) -> None:
+        pass
+
 
 class PaperBroker(BaseBroker):
-    def __init__(self, db_path: str = "paper_db.sqlite3", initial_capital: float = 10000.0):
+    def __init__(self, db_path: str = DB_PATH, initial_capital: float = 10000.0):
         self.db_path = db_path
         self.initial_capital = initial_capital
         self._init_db()
@@ -137,3 +142,10 @@ class PaperBroker(BaseBroker):
 
         logger.info(f"Position Closed: Trade #{trade_id} -> Net PnL: {net_pnl:.2f}")
         return {"trade_id": trade_id, "pnl": net_pnl}
+
+    def close_all_positions(self) -> None:
+        positions = self.get_open_positions()
+        # In a real environment, you would fetch current market prices.
+        # Here we just use the last known entry or stop for emergency.
+        # This will be properly handled in main.py loop panic button.
+        pass

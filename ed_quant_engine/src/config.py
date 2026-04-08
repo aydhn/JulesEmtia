@@ -3,17 +3,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Telegram Credentials
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "DUMMY_TOKEN")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "123456789")
+DB_PATH = "data/paper_db.sqlite3"
+MODEL_PATH = "models/rf_model.pkl"
 
-# Initial Capital
-INITIAL_CAPITAL = 10000.0
-
-# Tickers Definition (Phase 1)
 TICKERS = {
-    "METALS": ["GC=F", "SI=F", "HG=F", "PA=F", "PL=F"],
-    "ENERGY": ["CL=F", "BZ=F", "NG=F", "HO=F", "RB=F"],
-    "AGRI": ["ZW=F", "ZC=F", "ZS=F", "KC=F", "CC=F", "SB=F", "CT=F"],
-    "FOREX": ["USDTRY=X", "EURTRY=X", "GBPTRY=X", "JPYTRY=X", "CHFTRY=X"]
+    "Metals": ["GC=F", "SI=F", "HG=F", "PA=F", "PL=F"],
+    "Energy": ["CL=F", "BZ=F", "NG=F"],
+    "Agri": ["ZW=F", "ZC=F", "ZS=F", "KC=F", "CC=F", "SB=F", "CT=F"],
+    "Forex": ["USDTRY=X", "EURTRY=X", "GBPTRY=X", "JPYTRY=X"]
 }
+
+# Combine all into a single list
+ALL_TICKERS = [t for group in TICKERS.values() for t in group]

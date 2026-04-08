@@ -27,7 +27,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("quant_engine.log"),
+        logging.FileHandler("logs/quant_engine.log"),
         logging.StreamHandler()
     ]
 )
@@ -49,7 +49,7 @@ class EDQuantEngine:
         self.reporter = Reporter()
         self.monte_carlo = MonteCarloSimulator()
 
-    async def get_status_report(self) -> str:
+    def get_status_report(self) -> str:
         bal = self.broker.get_account_balance()
         open_pos = self.broker.get_open_positions()
         pos_str = "\n".join([f"• {p['ticker']} {p['direction']} (Pnl: {p['pnl']:.2f})" for p in open_pos]) if open_pos else "Yok"
@@ -70,7 +70,7 @@ class EDQuantEngine:
         """Phase 13: Generate Tear Sheet and send via Telegram."""
         logger.info("Generating weekly Tear Sheet...")
         try:
-            report_path = self.reporter.generate_tear_sheet()
+            report_path = self.reporter.generate_html_report()
             if os.path.exists(report_path):
                 await tg_bot.send_document(report_path, "ED Capital - Haftalık Piyasa Genel Bakış")
         except Exception as e:
@@ -84,8 +84,9 @@ class EDQuantEngine:
             for ticker in self.data_engine.all_tickers:
                 htf, ltf = await self.data_engine.fetch_mtf_data(ticker)
                 if not htf.empty and not ltf.empty:
-                    merged = calculate_mtf_features(htf, ltf)
-                    all_historical_data = pd.concat([all_historical_data, merged])
+                    merged = self.data_engine.merge_mtf_data(htf, ltf)
+                    features_df = calculate_mtf_features(htf, ltf) # Merge handles inside here as well if not careful
+                    all_historical_data = pd.concat([all_historical_data, features_df])
 
             if not all_historical_data.empty:
                 self.ml_validator.train(all_historical_data)
@@ -95,6 +96,7 @@ class EDQuantEngine:
 
     async def run_live_cycle(self):
         logger.info("Starting live evaluation cycle...")
+        htf_ltf = {}
         try:
             if tg_bot.is_paused:
                 logger.info("System is Paused. Skipping new signals.")
@@ -102,7 +104,6 @@ class EDQuantEngine:
             await self.macro.fetch_macro_data()
             is_black_swan = self.macro.is_black_swan()
 
-            htf_ltf = {}
             for ticker in self.data_engine.all_tickers:
                 htf, ltf = await self.data_engine.fetch_mtf_data(ticker)
                 if not htf.empty and not ltf.empty:
@@ -116,8 +117,10 @@ class EDQuantEngine:
                 ticker = pos['ticker']
                 if ticker not in htf_ltf: continue
 
-                curr_price = htf_ltf[ticker]['ltf']['Close'].iloc[-1]
-                atr = htf_ltf[ticker]['ltf'].get('ATR_14', pd.Series([curr_price * 0.01])).iloc[-1]
+                curr_price = float(htf_ltf[ticker]['ltf']['Close'].iloc[-1])
+                # Attempt to get ATR, fallback to 1%
+                atr_series = htf_ltf[ticker]['ltf'].get('ATR_14')
+                atr = float(atr_series.iloc[-1]) if atr_series is not None else curr_price * 0.01
 
                 # Check Circuit Breakers
                 if is_black_swan or self.macro.is_flash_crash(htf_ltf[ticker]['ltf']):
@@ -151,10 +154,7 @@ class EDQuantEngine:
             if tg_bot.is_paused or is_black_swan:
                 return
 
-            corr_df = pd.DataFrame()
-            for t, data in htf_ltf.items():
-                corr_df[t] = data['ltf']['Close'].tail(30)
-            corr_matrix = corr_df.corr()
+            corr_matrix = self.portfolio.calculate_correlation_matrix({t: d['ltf'] for t, d in htf_ltf.items()})
 
             for category in TICKERS.keys():
                 await self.sentiment.fetch_sentiment(category)
@@ -170,8 +170,8 @@ class EDQuantEngine:
 
                 if not signal: continue
                 direction = signal['dir']
-                curr_price = signal['price']
-                atr = signal['atr']
+                curr_price = float(signal['price'])
+                atr = float(signal['atr'])
 
                 cat = next((k for k, v in TICKERS.items() if ticker in v), "FOREX")
 
@@ -189,7 +189,7 @@ class EDQuantEngine:
 
                 if lot_size <= 0: continue
 
-                spread, slippage = self.execution.calculate_costs(ticker, cat, curr_price, atr)
+                spread, slippage = self.execution.calculate_costs(ticker, curr_price, atr)
 
                 sl = curr_price - (1.5 * atr) if direction == "LONG" else curr_price + (1.5 * atr)
                 tp = curr_price + (3.0 * atr) if direction == "LONG" else curr_price - (3.0 * atr)
@@ -234,4 +234,8 @@ async def main_loop():
         await asyncio.sleep(1)
 
 if __name__ == "__main__":
+    os.makedirs("logs", exist_ok=True)
+    os.makedirs("data", exist_ok=True)
+    os.makedirs("models", exist_ok=True)
+    os.makedirs("reports", exist_ok=True)
     asyncio.run(main_loop())
