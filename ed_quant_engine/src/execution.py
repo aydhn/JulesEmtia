@@ -1,7 +1,11 @@
-import logging
+from __future__ import annotations
+
 from typing import Tuple
 
-logger = logging.getLogger(__name__)
+from src.logger import get_logger
+
+logger = get_logger()
+
 
 class ExecutionModel:
     """

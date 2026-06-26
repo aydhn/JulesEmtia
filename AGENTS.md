@@ -22,6 +22,32 @@ Build and maintain JulesEmtia as a zero-budget, local, low-frequency paper tradi
 - Preserve lookahead protection: LTF signals may only use shifted closed HTF data.
 - Keep RF/PPO model manifests in sync with feature columns and observation shape.
 - Fail closed for ML/model uncertainty unless a test explicitly uses a temp demo mode.
+- Every RF/PPO training cycle MUST call `model_registry.record_training()`.
+- `init_db()` is idempotent via `_db_initialized` sentinel — safe to call anywhere.
+
+## Log Level Policy
+
+| Handler | Level  | Notes |
+|---------|--------|-------|
+| File (rotating) | INFO | Full detail for post-mortem analysis |
+| Console (StreamHandler) | WARNING | Operator-facing, noise-free |
+| TelegramCriticalHandler | CRITICAL | Immediate alert only |
+
+Set `JULESEMTIA_DEBUG_CONSOLE=1` to promote console to INFO for debugging sessions.
+
+## Key Modules
+
+| Module | Role |
+|--------|------|
+| `src/paper_db.py` | Paper trade SQLite DB (schema v2) |
+| `src/model_registry.py` | ML performance history + degradation detection |
+| `src/continuous_learner.py` | PPO + RF training loop (Sharpe-reward PPO) |
+| `src/walk_forward.py` | Walk-Forward Optimization (WFE metric) |
+| `src/ml_validator.py` | RF training + live signal validation |
+| `src/strategy.py` | Signal generation (closed-candle, HTF shifted) |
+| `src/broker.py` | PaperBroker → paper_db |
+| `src/notifier.py` | Telegram bot (Turkish commands) |
+| `src/reporter.py` | Weekly HTML tear sheet |
 
 ## Validation Commands
 
@@ -43,3 +69,4 @@ $env:JULESEMTIA_NO_PAUSE=1
 ```
 
 Acceptance requires 30 minutes of stable runtime and a clean diagnostic report after the run.
+Console must show WARNING-level messages only (no INFO spam).

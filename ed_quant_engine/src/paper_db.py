@@ -19,6 +19,9 @@ logger = get_logger()
 SCHEMA_VERSION = 2
 DB_PATH = str(PAPER_DB_PATH)
 
+# Sentinel: ensures init_db() schema-check runs only once per process.
+_db_initialized: bool = False
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -26,7 +29,6 @@ def _utc_now() -> str:
 
 @contextmanager
 def _connect():
-    ensure_runtime_dirs()
     conn = sqlite3.connect(PAPER_DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
@@ -204,6 +206,12 @@ def record_account_epoch(
 
 
 def init_db() -> None:
+    """Initialize the paper DB schema. Idempotent — safe to call many times,
+    but only performs real work once per process (guarded by _db_initialized)."""
+    global _db_initialized
+    if _db_initialized:
+        return
+
     ensure_runtime_dirs()
     if PAPER_DB_PATH.exists():
         with sqlite3.connect(PAPER_DB_PATH) as conn:
@@ -221,7 +229,10 @@ def init_db() -> None:
                 """,
                 (_utc_now(), INITIAL_BALANCE),
             )
+
+    _db_initialized = True
     logger.info("Paper DB initialized at %s", PAPER_DB_PATH)
+
 
 
 def archive_and_reset_account(reason: str = "manual_archive_reset") -> dict[str, Any]:

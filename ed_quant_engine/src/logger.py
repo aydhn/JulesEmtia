@@ -12,7 +12,7 @@ from src.paths import LOG_PATH, ensure_runtime_dirs
 ensure_runtime_dirs()
 
 logger = logging.getLogger("ED_Quant_Engine")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 logger.propagate = False
 
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -54,7 +54,9 @@ if not logger.handlers:
     fh.setFormatter(formatter)
 
     ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
+    # Console: WARNING+ by default. Set JULESEMTIA_DEBUG_CONSOLE=1 for full INFO stream.
+    _console_level = logging.INFO if os.getenv("JULESEMTIA_DEBUG_CONSOLE") == "1" else logging.WARNING
+    ch.setLevel(_console_level)
     ch.setFormatter(formatter)
 
     th = TelegramCriticalHandler()

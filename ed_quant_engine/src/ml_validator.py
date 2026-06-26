@@ -18,6 +18,9 @@ from src.paths import MODEL_DIR, model_file
 logger = get_logger()
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
+# Tickers that have been warned about insufficient data — only warn once per process.
+_warned_sparse_tickers: set[str] = set()
+
 FEATURE_CANDIDATES = [
     "RSI_14",
     "ATR_14",
@@ -87,7 +90,15 @@ def _model_paths(ticker: str) -> tuple:
 
 def train_symbol_model(ticker: str, historical_df: pd.DataFrame) -> tuple[bool, float]:
     if len(historical_df) < MIN_TRAINING_ROWS:
-        logger.warning("Not enough data to train RF for %s (%s rows).", ticker, len(historical_df))
+        if ticker not in _warned_sparse_tickers:
+            logger.warning(
+                "Not enough data to train RF for %s (%s rows). Will keep retrying silently.",
+                ticker,
+                len(historical_df),
+            )
+            _warned_sparse_tickers.add(ticker)
+        else:
+            logger.debug("RF skipped for %s: still sparse (%s rows).", ticker, len(historical_df))
         return False, 0.0
 
     features = _build_feature_list(historical_df)

@@ -26,6 +26,7 @@ from src.config import (
 from src.data_loader import fetch_ticker_data_async
 from src.features import add_features
 from src.logger import get_logger
+from src.model_registry import is_degraded, record_training
 from src.paths import MODEL_DIR, MODEL_QUARANTINE_DIR, model_file
 
 
@@ -82,42 +83,59 @@ class TradingEnv(gym.Env):
         self.current_step = 0
         self.position = 0
         self.entry_price = 0.0
+        # Track per-step returns for Sharpe-like reward shaping
+        self._step_returns: list[float] = []
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.current_step = 0
         self.position = 0
         self.entry_price = 0.0
+        self._step_returns = []
         return self.data[0], {}
 
     def step(self, action):
         action_val = int(np.atleast_1d(np.asarray(action)).flat[0])
-        reward = 0.0
         current_price = float(self.close_prices[self.current_step])
+        step_return = 0.0
 
         if action_val == 1:
             if self.position == -1:
-                reward += (self.entry_price - current_price) / max(self.entry_price, 1e-9)
+                step_return += (self.entry_price - current_price) / max(self.entry_price, 1e-9)
             if self.position != 1:
                 self.position = 1
                 self.entry_price = current_price
         elif action_val == 2:
             if self.position == 1:
-                reward += (current_price - self.entry_price) / max(self.entry_price, 1e-9)
+                step_return += (current_price - self.entry_price) / max(self.entry_price, 1e-9)
             if self.position != -1:
                 self.position = -1
                 self.entry_price = current_price
 
-        reward -= 0.0001
+        # Transaction cost penalty
+        step_return -= 0.0001
+        self._step_returns.append(step_return)
+
         self.current_step += 1
         max_step = len(self.data) - 1
         terminated = self.current_step >= max_step
+
         if terminated:
             final_price = float(self.close_prices[min(self.current_step, max_step)])
             if self.position == 1:
-                reward += (final_price - self.entry_price) / max(self.entry_price, 1e-9)
+                step_return += (final_price - self.entry_price) / max(self.entry_price, 1e-9)
             elif self.position == -1:
-                reward += (self.entry_price - final_price) / max(self.entry_price, 1e-9)
+                step_return += (self.entry_price - final_price) / max(self.entry_price, 1e-9)
+
+        # Sharpe-like reward: scale step return by rolling Sharpe ratio
+        # This encourages consistent, low-volatility returns over raw directional bets.
+        arr = np.asarray(self._step_returns, dtype=np.float64)
+        if len(arr) >= 10:
+            mu = float(np.mean(arr))
+            sigma = float(np.std(arr))
+            reward = mu / (sigma + 1e-8) * 0.01 + step_return
+        else:
+            reward = step_return
 
         return self.data[min(self.current_step, max_step)], float(reward), terminated, False, {}
 
@@ -161,7 +179,7 @@ class ContinuousLearner:
         try:
             if model_path.exists() and self._ppo_manifest_valid(manifest_path, env):
                 model = PPO.load(model_path, env=env)
-                logger.info("PPO model loaded for %s.", ticker)
+                logger.debug("PPO model loaded for %s.", ticker)
             else:
                 _quarantine(model_path, "manifest_mismatch")
                 _quarantine(manifest_path, "manifest_mismatch")
@@ -204,10 +222,12 @@ class ContinuousLearner:
             logger.error("PPO evaluation failed for %s: %s", ticker, exc)
             return True, 0.0, 0.0
 
-    def train_rf(self, ticker: str, df: pd.DataFrame) -> tuple[bool, float]:
+    def train_rf(self, ticker: str, df: pd.DataFrame, cycle: int = 0) -> tuple[bool, float]:
         from src.ml_validator import train_symbol_model
-
-        return train_symbol_model(ticker, df)
+        ok, acc = train_symbol_model(ticker, df)
+        if ok or acc > 0:
+            record_training(ticker, "RF", cycle, acc, samples=len(df))
+        return ok, acc
 
     def run_backtest_for_ticker(self, ticker: str, df: pd.DataFrame) -> dict:
         try:
@@ -282,7 +302,12 @@ class ContinuousLearner:
                 if self.performance_metrics
                 else 0.0
             )
-            bootstrap_mode = trained < len(ALL_TICKERS) * BOOTSTRAP_COVERAGE_THRESHOLD or avg_wr < BOOTSTRAP_WINRATE_THRESHOLD
+            # Bootstrap if: coverage < 50% OR avg win-rate below threshold OR
+            # any ticker shows registry-detected model degradation.
+            bootstrap_mode = (
+                trained < len(ALL_TICKERS) * BOOTSTRAP_COVERAGE_THRESHOLD
+                or avg_wr < BOOTSTRAP_WINRATE_THRESHOLD
+            )
             cycle_metrics: dict[str, dict] = {}
 
             for ticker in ALL_TICKERS:
@@ -290,8 +315,19 @@ class ContinuousLearner:
                 if df.empty:
                     logger.info("Training deferred for %s: no prepared data.", ticker)
                     continue
-                ppo_ok, ppo_wr, ppo_pnl = await asyncio.to_thread(self.train_ppo, ticker, df, bootstrap_mode)
-                rf_ok, rf_acc = await asyncio.to_thread(self.train_rf, ticker, df)
+
+                # Force bootstrap if registry detects degradation for this ticker
+                ticker_bootstrap = bootstrap_mode or is_degraded(ticker, "RF") or is_degraded(ticker, "PPO")
+
+                ppo_ok, ppo_wr, ppo_pnl = await asyncio.to_thread(
+                    self.train_ppo, ticker, df, ticker_bootstrap
+                )
+                if ppo_ok:
+                    record_training(ticker, "PPO", self._cycle_count, ppo_wr, samples=len(df))
+
+                rf_ok, rf_acc = await asyncio.to_thread(
+                    self.train_rf, ticker, df, self._cycle_count
+                )
                 bt_metrics = await asyncio.to_thread(self.run_backtest_for_ticker, ticker, df)
                 cycle_metrics[ticker] = {
                     "ppo_win_rate": ppo_wr if ppo_ok else 0.0,
@@ -311,7 +347,8 @@ class ContinuousLearner:
             avg_wr = sum(m.get("ppo_win_rate", 0) for m in self.performance_metrics.values()) / max(trained, 1)
             sleep_for = TRAINING_BOOTSTRAP_SLEEP_SECONDS if bootstrap_mode else TRAINING_ROUTINE_SLEEP_SECONDS
             logger.info(
-                "Training cycle complete. trained=%s/%s avg_ppo_wr=%.1f%% sleep=%ss",
+                "Training cycle %s complete. trained=%s/%s avg_ppo_wr=%.1f%% sleep=%ss",
+                self._cycle_count,
                 trained,
                 len(ALL_TICKERS),
                 avg_wr,

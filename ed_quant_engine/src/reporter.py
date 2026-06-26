@@ -1,87 +1,93 @@
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
+from __future__ import annotations
+
 import base64
 from io import BytesIO
+
+import matplotlib.pyplot as plt
+import pandas as pd
+import seaborn as sns
+
 import src.paper_db as db
+from src.config import INITIAL_BALANCE
 from src.logger import get_logger
 from src.monte_carlo import run_monte_carlo
 from src.paths import REPORT_DIR, ensure_runtime_dirs
 
 logger = get_logger()
 
-def create_tear_sheet(output_format="html"):
+
+def create_tear_sheet(output_format: str = "html") -> str | None:
     df = db.get_closed_trades()
     if df.empty:
         logger.info("No closed trades to report.")
         return None
 
-    # Metrics Calculation
-    initial_balance = 10000.0
+    # ── Metrics ──────────────────────────────────────────────────────────────
+    initial_balance = float(INITIAL_BALANCE)
     current_balance = db.get_balance()
-    total_pnl = df['pnl'].sum()
+    total_pnl = df["pnl"].sum()
 
-    wins = df[df['pnl'] > 0]
-    losses = df[df['pnl'] <= 0]
-    win_rate = len(wins) / len(df) * 100 if len(df) > 0 else 0
+    wins = df[df["pnl"] > 0]
+    losses = df[df["pnl"] <= 0]
+    win_rate = len(wins) / len(df) * 100 if len(df) > 0 else 0.0
 
-    gross_profit = wins['pnl'].sum()
-    gross_loss = abs(losses['pnl'].sum())
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
+    gross_profit = wins["pnl"].sum()
+    gross_loss = abs(losses["pnl"].sum())
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
 
-    avg_win = wins['pnl'].mean() if len(wins) > 0 else 0
-    avg_loss = losses['pnl'].mean() if len(losses) > 0 else 0
+    avg_win = float(wins["pnl"].mean()) if len(wins) > 0 else 0.0
+    avg_loss = float(losses["pnl"].mean()) if len(losses) > 0 else 0.0
 
-    # Equity Curve
-    df['cumulative_pnl'] = df['pnl'].cumsum()
-    df['equity'] = initial_balance + df['cumulative_pnl']
+    # ── Equity Curve ─────────────────────────────────────────────────────────
+    df["cumulative_pnl"] = df["pnl"].cumsum()
+    df["equity"] = initial_balance + df["cumulative_pnl"]
 
     plt.figure(figsize=(10, 5))
-    plt.plot(df['exit_time'], df['equity'], label='Equity', color='blue')
-    plt.title('Kasa Büyüme Eğrisi')
+    plt.plot(df["exit_time"], df["equity"], label="Equity", color="blue")
+    plt.title("Kasa Büyüme Eğrisi")
     plt.xticks(rotation=45)
     plt.tight_layout()
 
     buf = BytesIO()
-    plt.savefig(buf, format='png')
+    plt.savefig(buf, format="png")
     buf.seek(0)
-    equity_img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+    equity_img_b64 = base64.b64encode(buf.read()).decode("utf-8")
     plt.close()
 
-    # Monthly Returns Heatmap
-    heatmap_img_base64 = ""
+    # ── Monthly Returns Heatmap ───────────────────────────────────────────────
+    heatmap_img_b64 = ""
     try:
-        df['exit_time'] = pd.to_datetime(df['exit_time'])
-        df['Year'] = df['exit_time'].dt.year
-        df['Month'] = df['exit_time'].dt.month
-        monthly_pnl = df.groupby(['Year', 'Month'])['pnl_pct'].apply(lambda x: (1 + x).prod() - 1).unstack().fillna(0) * 100
-
+        df["exit_time"] = pd.to_datetime(df["exit_time"])
+        df["Year"] = df["exit_time"].dt.year
+        df["Month"] = df["exit_time"].dt.month
+        monthly_pnl = (
+            df.groupby(["Year", "Month"])["pnl_pct"]
+            .apply(lambda x: (1 + x).prod() - 1)
+            .unstack()
+            .fillna(0) * 100
+        )
         plt.figure(figsize=(10, 5))
         sns.heatmap(monthly_pnl, annot=True, fmt=".2f", cmap="RdYlGn", center=0)
-        plt.title('Aylık Getiri Isı Haritası (%)')
+        plt.title("Aylık Getiri Isı Haritası (%)")
         plt.tight_layout()
 
         buf_hm = BytesIO()
-        plt.savefig(buf_hm, format='png')
+        plt.savefig(buf_hm, format="png")
         buf_hm.seek(0)
-        heatmap_img_base64 = base64.b64encode(buf_hm.read()).decode('utf-8')
+        heatmap_img_b64 = base64.b64encode(buf_hm.read()).decode("utf-8")
         plt.close()
-    except Exception as e:
-        logger.error(f"Error generating heatmap: {e}")
+    except Exception as exc:
+        logger.warning("Error generating monthly heatmap: %s", exc)
 
-    # Monte Carlo Risk Validation
+    # ── Monte Carlo ───────────────────────────────────────────────────────────
     mc_results = run_monte_carlo()
-    mc_md_99 = mc_results.get("expected_max_drawdown_99", None)
-    mc_ruin = mc_results.get("risk_of_ruin_pct", None)
+    mc_md_99 = mc_results.get("expected_max_drawdown_99")
+    mc_ruin = mc_results.get("risk_of_ruin_pct")
 
-    if mc_md_99 is None or mc_ruin is None:
-        mc_md_99_str = "Yetersiz Veri (En az 30 işlem gerekli)"
-        mc_ruin_str = "Yetersiz Veri"
-    else:
-        mc_md_99_str = f"{mc_md_99:.2f}%"
-        mc_ruin_str = f"{mc_ruin:.2f}%"
+    mc_md_99_str = f"{mc_md_99:.2f}%" if mc_md_99 is not None else "Yetersiz Veri (En az 20 işlem gerekli)"
+    mc_ruin_str = f"{mc_ruin:.2f}%" if mc_ruin is not None else "Yetersiz Veri"
 
-    # HTML Template
+    # ── HTML ──────────────────────────────────────────────────────────────────
     html_content = f"""
     <html>
     <head>
@@ -114,12 +120,12 @@ def create_tear_sheet(output_format="html"):
         </div>
 
         <h2>Kasa Büyüme Eğrisi</h2>
-        <img src="data:image/png;base64,{equity_img_base64}" alt="Equity Curve">
+        <img src="data:image/png;base64,{equity_img_b64}" alt="Equity Curve">
 
         <h2>Aylık Getiri Analizi</h2>
-        """
-    if heatmap_img_base64:
-        html_content += f'<img src="data:image/png;base64,{heatmap_img_base64}" alt="Monthly Heatmap">'
+    """
+    if heatmap_img_b64:
+        html_content += f'<img src="data:image/png;base64,{heatmap_img_b64}" alt="Monthly Heatmap">'
 
     html_content += """
     </body>
@@ -128,8 +134,7 @@ def create_tear_sheet(output_format="html"):
 
     ensure_runtime_dirs()
     report_path = REPORT_DIR / "tear_sheet.html"
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(html_content)
+    report_path.write_text(html_content, encoding="utf-8")
 
-    logger.info(f"Tear sheet generated at {report_path}")
+    logger.info("Tear sheet generated at %s", report_path)
     return str(report_path)

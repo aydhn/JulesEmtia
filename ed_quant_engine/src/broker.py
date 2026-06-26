@@ -89,7 +89,8 @@ class PaperBroker(BaseBroker):
             "position_size": position_size,
             "status": "FILLED"
         }
-        logger.info(f"[EXECUTION RECEIPT] {receipt}")
+        logger.info("[EXECUTION RECEIPT] trade_id=%s ticker=%s dir=%s exec_price=%.6f",
+                    trade_id, ticker, direction, execution_price)
         return receipt
 
     def close_position(
@@ -130,7 +131,8 @@ class PaperBroker(BaseBroker):
             "pnl": result.get("pnl", 0.0),
             "status": "CLOSED"
         }
-        logger.info(f"[CLOSE RECEIPT] {receipt}")
+        logger.info("[CLOSE RECEIPT] trade_id=%s exec_price=%.6f pnl=%.2f",
+                    trade_id, execution_price, result.get("pnl", 0.0))
         return receipt
 
     def modify_trailing_stop(self, trade_id: int, new_sl: float, is_breakeven: bool = False):
