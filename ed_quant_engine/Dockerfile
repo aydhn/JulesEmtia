@@ -16,9 +16,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download NLTK data (vader_lexicon)
-RUN python -m nltk.downloader vader_lexicon
-
 # Copy the rest of the application code
 COPY . .
 
