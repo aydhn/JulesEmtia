@@ -6,7 +6,7 @@ from io import BytesIO
 import src.paper_db as db
 from src.logger import get_logger
 from src.monte_carlo import run_monte_carlo
-import os
+from src.paths import REPORT_DIR, ensure_runtime_dirs
 
 logger = get_logger()
 
@@ -54,7 +54,7 @@ def create_tear_sheet(output_format="html"):
         df['exit_time'] = pd.to_datetime(df['exit_time'])
         df['Year'] = df['exit_time'].dt.year
         df['Month'] = df['exit_time'].dt.month
-        monthly_pnl = df.groupby(['Year', 'Month'])['pnl_pct'].sum().unstack().fillna(0) * 100
+        monthly_pnl = df.groupby(['Year', 'Month'])['pnl_pct'].apply(lambda x: (1 + x).prod() - 1).unstack().fillna(0) * 100
 
         plt.figure(figsize=(10, 5))
         sns.heatmap(monthly_pnl, annot=True, fmt=".2f", cmap="RdYlGn", center=0)
@@ -71,8 +71,15 @@ def create_tear_sheet(output_format="html"):
 
     # Monte Carlo Risk Validation
     mc_results = run_monte_carlo()
-    mc_md_99 = mc_results.get("expected_max_drawdown_99", 0.0)
-    mc_ruin = mc_results.get("risk_of_ruin_pct", 0.0)
+    mc_md_99 = mc_results.get("expected_max_drawdown_99", None)
+    mc_ruin = mc_results.get("risk_of_ruin_pct", None)
+
+    if mc_md_99 is None or mc_ruin is None:
+        mc_md_99_str = "Yetersiz Veri (En az 30 işlem gerekli)"
+        mc_ruin_str = "Yetersiz Veri"
+    else:
+        mc_md_99_str = f"{mc_md_99:.2f}%"
+        mc_ruin_str = f"{mc_ruin:.2f}%"
 
     # HTML Template
     html_content = f"""
@@ -102,8 +109,8 @@ def create_tear_sheet(output_format="html"):
 
         <h2>Risk Validasyonu (Monte Carlo)</h2>
         <div class="metric-box">
-            <div class="metric-row"><span class="metric-label">%99 Güven Aralığında Max Drawdown:</span> <span class="risk-critical">{mc_md_99:.2f}%</span></div>
-            <div class="metric-row"><span class="metric-label">İflas Riski (Risk of Ruin):</span> <span class="risk-critical">{mc_ruin:.2f}%</span></div>
+            <div class="metric-row"><span class="metric-label">%99 Güven Aralığında Max Drawdown:</span> <span class="risk-critical">{mc_md_99_str}</span></div>
+            <div class="metric-row"><span class="metric-label">İflas Riski (Risk of Ruin):</span> <span class="risk-critical">{mc_ruin_str}</span></div>
         </div>
 
         <h2>Kasa Büyüme Eğrisi</h2>
@@ -119,10 +126,10 @@ def create_tear_sheet(output_format="html"):
     </html>
     """
 
-    os.makedirs("reports", exist_ok=True)
-    report_path = "reports/tear_sheet.html"
-    with open(report_path, "w") as f:
+    ensure_runtime_dirs()
+    report_path = REPORT_DIR / "tear_sheet.html"
+    with open(report_path, "w", encoding="utf-8") as f:
         f.write(html_content)
 
     logger.info(f"Tear sheet generated at {report_path}")
-    return report_path
+    return str(report_path)

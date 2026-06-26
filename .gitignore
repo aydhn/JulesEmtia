@@ -1,4 +1,60 @@
+# Virtual environments
+.venv/
 venv/
-.venv/
-.venv/
-.venv
+env/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+
+# Runtime logs
+logs/
+ed_quant_engine/logs/
+*.log
+
+# Local SQLite/data warehouses
+data/
+ed_quant_engine/data/
+*.db
+*.sqlite3
+
+# Generated ML models and manifests
+models/
+ed_quant_engine/models/
+*.pkl
+*.joblib
+*.zip
+
+# Generated reports
+reports/
+ed_quant_engine/reports/
+*.html
+*.pdf
+
+# Local secrets
+.env
+.env.local
+.env.*.local
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# Generated templates
+templates/generated/

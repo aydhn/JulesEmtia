@@ -1,8 +1,0 @@
-.env
-data/*.db
-data/*.sqlite3
-logs/*.log
-__pycache__/
-*.pyc
-.vscode/
-data/*.pkl

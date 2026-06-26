@@ -1,26 +1,39 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-case "$1" in
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+compose() {
+    if command -v docker-compose >/dev/null 2>&1; then
+        docker-compose "$@"
+    else
+        docker compose "$@"
+    fi
+}
+
+case "${1:-}" in
     start)
-        echo "Starting ED Capital Quant Engine..."
-        docker-compose up -d --build
+        echo "Starting JulesEmtia Quant Engine..."
+        compose up -d --build
         ;;
     stop)
-        echo "Stopping ED Capital Quant Engine..."
-        docker-compose down
+        echo "Stopping JulesEmtia Quant Engine..."
+        compose down
         ;;
     restart)
-        echo "Restarting ED Capital Quant Engine..."
-        docker-compose down
-        docker-compose up -d --build
+        echo "Restarting JulesEmtia Quant Engine..."
+        compose down
+        compose up -d --build
         ;;
     logs)
-        docker-compose logs -f
+        compose logs -f --tail=200
         ;;
     status)
-        docker-compose ps
+        compose ps
         ;;
     *)
-        echo "Usage: \$0 {start|stop|restart|logs|status}"
+        echo "Usage: $0 {start|stop|restart|logs|status}"
+        exit 2
         ;;
 esac

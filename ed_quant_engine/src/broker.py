@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, List, Any
+from typing import Any, Dict, List
 import src.paper_db as db
 from src.logger import get_logger
 from src.execution import ExecutionModel
@@ -36,7 +36,21 @@ class PaperBroker(BaseBroker):
     def get_account_balance(self) -> float:
         return db.get_balance()
 
-    def place_market_order(self, ticker: str, direction: str, market_price: float, sl_price: float, tp_price: float, position_size: float, slippage: float = 0.0, spread: float = 0.0, atr: float = 0.0) -> Dict[str, Any]:
+    def place_market_order(
+        self,
+        ticker: str,
+        direction: str,
+        market_price: float,
+        sl_price: float,
+        tp_price: float,
+        position_size: float,
+        slippage: float = 0.0,
+        spread: float = 0.0,
+        atr: float = 0.0,
+        risk_pct: float = 0.0,
+        strategy_tag: str = "confluence",
+        metadata: dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         """
         Executes a simulated market order with SPL Level 3 execution receipt audit logs.
         Applies dynamic slippage and spread to the entry price using ExecutionModel.
@@ -51,7 +65,18 @@ class PaperBroker(BaseBroker):
         else:
             execution_price = market_price - (dynamic_spread / 2) - dynamic_slippage
 
-        trade_id = db.open_trade(ticker, direction, execution_price, sl_price, tp_price, position_size)
+        trade_id = db.open_trade(
+            ticker=ticker,
+            direction=direction,
+            entry_price=execution_price,
+            sl_price=sl_price,
+            tp_price=tp_price,
+            position_size=position_size,
+            risk_pct=risk_pct,
+            atr=atr,
+            strategy_tag=strategy_tag,
+            metadata=metadata or receipt_metadata(ticker, direction, market_price),
+        )
 
         receipt = {
             "trade_id": trade_id,
@@ -67,7 +92,15 @@ class PaperBroker(BaseBroker):
         logger.info(f"[EXECUTION RECEIPT] {receipt}")
         return receipt
 
-    def close_position(self, trade_id: int, market_price: float, slippage: float = 0.0, spread: float = 0.0, atr: float = 0.0) -> Dict[str, Any]:
+    def close_position(
+        self,
+        trade_id: int,
+        market_price: float,
+        slippage: float = 0.0,
+        spread: float = 0.0,
+        atr: float = 0.0,
+        exit_reason: str = "market",
+    ) -> Dict[str, Any]:
         open_trades = db.get_open_trades()
         trade = next((t for t in open_trades if t['trade_id'] == trade_id), None)
         if not trade:
@@ -86,7 +119,7 @@ class PaperBroker(BaseBroker):
         else:
             execution_price = market_price + (dynamic_spread / 2) + dynamic_slippage
 
-        result = db.close_trade(trade_id, execution_price)
+        result = db.close_trade(trade_id, execution_price, exit_reason=exit_reason)
 
         receipt = {
             "trade_id": trade_id,
@@ -105,3 +138,12 @@ class PaperBroker(BaseBroker):
 
     def get_open_positions(self) -> List[Dict[str, Any]]:
         return db.get_open_trades()
+
+
+def receipt_metadata(ticker: str, direction: str, market_price: float) -> dict[str, Any]:
+    return {
+        "ticker": ticker,
+        "direction": direction,
+        "requested_market_price": float(market_price),
+        "source": "PaperBroker",
+    }

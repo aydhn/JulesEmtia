@@ -1,14 +1,16 @@
 [Unit]
-Description=ED Capital Quant Engine Daemon
-After=network.target
+Description=JulesEmtia Quant Engine
+Wants=network-online.target
+After=network-online.target docker.service
 
 [Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/ed_quant_engine
-ExecStart=/usr/local/bin/docker-compose -f /opt/ed_quant_engine/docker-compose.yml up
-ExecStop=/usr/local/bin/docker-compose -f /opt/ed_quant_engine/docker-compose.yml stop
-Restart=always
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/JulesEmtia/ed_quant_engine
+ExecStart=/opt/JulesEmtia/ed_quant_engine/manage_bot.sh start
+ExecStop=/opt/JulesEmtia/ed_quant_engine/manage_bot.sh stop
+ExecReload=/opt/JulesEmtia/ed_quant_engine/manage_bot.sh restart
+Restart=on-failure
 RestartSec=10
 Environment="TZ=Europe/Istanbul"
 
